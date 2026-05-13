@@ -1,0 +1,137 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: oklch(0.13 0.008 280);
+  --color-foreground: oklch(0.985 0 0);
+  --color-card: oklch(0.17 0.012 280);
+  --color-card-foreground: oklch(0.985 0 0);
+  --color-popover: oklch(0.17 0.012 280);
+  --color-popover-foreground: oklch(0.985 0 0);
+  --color-primary: oklch(0.623 0.214 259);
+  --color-primary-foreground: oklch(0.985 0 0);
+  --color-secondary: oklch(0.24 0.018 280);
+  --color-secondary-foreground: oklch(0.985 0 0);
+  --color-muted: oklch(0.24 0.018 280);
+  --color-muted-foreground: oklch(0.62 0.02 280);
+  --color-accent: oklch(0.28 0.025 280);
+  --color-accent-foreground: oklch(0.985 0 0);
+  --color-destructive: oklch(0.577 0.245 27.325);
+  --color-destructive-foreground: oklch(0.985 0 0);
+  --color-border: oklch(0.28 0.015 280);
+  --color-input: oklch(0.28 0.015 280);
+  --color-ring: oklch(0.623 0.214 259);
+  --color-chart-1: oklch(0.623 0.214 259);
+  --color-chart-2: oklch(0.65 0.18 155);
+  --color-chart-3: oklch(0.7 0.2 45);
+  --color-chart-4: oklch(0.65 0.18 340);
+  --color-chart-5: oklch(0.7 0.15 200);
+  --color-sidebar: oklch(0.14 0.01 280);
+  --color-sidebar-foreground: oklch(0.985 0 0);
+  --color-sidebar-primary: oklch(0.623 0.214 259);
+  --color-sidebar-primary-foreground: oklch(0.985 0 0);
+  --color-sidebar-accent: oklch(0.24 0.018 280);
+  --color-sidebar-accent-foreground: oklch(0.985 0 0);
+  --color-sidebar-border: oklch(0.28 0.015 280);
+  --color-sidebar-ring: oklch(0.623 0.214 259);
+
+  --color-success: oklch(0.65 0.18 155);
+  --color-warning: oklch(0.75 0.16 70);
+
+  --radius-lg: 0.625rem;
+  --radius-md: calc(var(--radius-lg) - 2px);
+  --radius-sm: calc(var(--radius-lg) - 4px);
+  --radius-xl: 0.875rem;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+  --animate-accordion-down: accordion-down 0.2s ease-out;
+  --animate-accordion-up: accordion-up 0.2s ease-out;
+}
+
+.light {
+  --color-background: oklch(0.98 0.003 280);
+  --color-foreground: oklch(0.13 0.008 280);
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.13 0.008 280);
+  --color-popover: oklch(1 0 0);
+  --color-popover-foreground: oklch(0.13 0.008 280);
+  --color-primary: oklch(0.488 0.243 264);
+  --color-primary-foreground: oklch(0.985 0 0);
+  --color-secondary: oklch(0.94 0.012 280);
+  --color-secondary-foreground: oklch(0.2 0.015 280);
+  --color-muted: oklch(0.94 0.012 280);
+  --color-muted-foreground: oklch(0.43 0.02 280);
+  --color-accent: oklch(0.92 0.018 280);
+  --color-accent-foreground: oklch(0.2 0.015 280);
+  --color-destructive: oklch(0.577 0.245 27.325);
+  --color-destructive-foreground: oklch(0.985 0 0);
+  --color-border: oklch(0.88 0.012 280);
+  --color-input: oklch(0.88 0.012 280);
+  --color-ring: oklch(0.488 0.243 264);
+  --color-sidebar: oklch(0.96 0.008 280);
+  --color-sidebar-foreground: oklch(0.13 0.008 280);
+  --color-sidebar-primary: oklch(0.488 0.243 264);
+  --color-sidebar-primary-foreground: oklch(0.985 0 0);
+  --color-sidebar-accent: oklch(0.92 0.018 280);
+  --color-sidebar-accent-foreground: oklch(0.2 0.015 280);
+  --color-sidebar-border: oklch(0.88 0.012 280);
+  --color-sidebar-ring: oklch(0.488 0.243 264);
+  --color-success: oklch(0.55 0.2 155);
+  --color-warning: oklch(0.65 0.2 70);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    margin: 0;
+  }
+}
+
+@keyframes accordion-down {
+  from { height: 0; }
+  to { height: var(--radix-accordion-content-height); }
+}
+@keyframes accordion-up {
+  from { height: var(--radix-accordion-content-height); }
+  to { height: 0; }
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-border rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-muted-foreground/40;
+}
+
+.hljs {
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+.lesson-markdown details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.lesson-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.lesson-mermaid :is(text, tspan) {
+  font-family: "Inter", ui-sans-serif, system-ui, sans-serif !important;
+}
