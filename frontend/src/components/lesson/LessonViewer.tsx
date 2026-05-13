@@ -1,4 +1,4 @@
-import { isValidElement } from "react";
+import { isValidElement, useMemo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -7,13 +7,27 @@ import { cn } from "@/lib/utils";
 import { MermaidDiagram } from "@/components/lesson/MermaidDiagram";
 import { slugifyHeading, stripLessonFrontmatter } from "@/lib/lesson-content";
 
+function extractMermaidBlocks(md: string): { cleaned: string; charts: string[] } {
+  const charts: string[] = [];
+  const cleaned = md.replace(
+    /```mermaid\s*\n([\s\S]*?)```/g,
+    (_, chart: string) => {
+      const idx = charts.length;
+      charts.push(chart.trim());
+      return `<div data-mermaid-idx="${idx}"></div>`;
+    },
+  );
+  return { cleaned, charts };
+}
+
 interface LessonViewerProps {
   content: string;
   className?: string;
 }
 
 export function LessonViewer({ content, className }: LessonViewerProps) {
-  const markdown = stripLessonFrontmatter(content);
+  const rawMarkdown = stripLessonFrontmatter(content);
+  const { cleaned: markdown, charts } = useMemo(() => extractMermaidBlocks(rawMarkdown), [rawMarkdown]);
 
   const components: Components = {
     h1: ({ children }) => (
@@ -90,15 +104,20 @@ export function LessonViewer({ content, className }: LessonViewerProps) {
         {children}
       </summary>
     ),
+    div: ({ children, ...props }) => {
+      const mermaidIdx = (props as Record<string, unknown>)["data-mermaid-idx"];
+      if (mermaidIdx != null) {
+        const idx = Number(mermaidIdx);
+        const chart = charts[idx];
+        if (chart) return <MermaidDiagram chart={chart} />;
+      }
+      return <div {...props}>{children}</div>;
+    },
     pre: ({ children }) => {
       const child = Array.isArray(children) ? children[0] : children;
-      const className =
+      const cls =
         isValidElement<{ className?: string }>(child) ? child.props.className ?? "" : "";
-      const language = className.replace("language-", "") || "code";
-
-      if (className.includes("language-mermaid")) {
-        return <>{children}</>;
-      }
+      const language = cls.replace(/language-/, "").split(/\s/)[0] || "code";
 
       return (
         <div className="my-7 overflow-hidden rounded-2xl border border-border/50 bg-[#0b1020] shadow-sm">
@@ -110,13 +129,6 @@ export function LessonViewer({ content, className }: LessonViewerProps) {
       );
     },
     code: ({ className, children, ...props }) => {
-      const value = String(children).replace(/\n$/, "");
-      const language = className?.replace("language-", "");
-
-      if (language === "mermaid") {
-        return <MermaidDiagram chart={value} />;
-      }
-
       if (className) {
         return (
           <code className={cn("font-mono text-sm", className)} {...props}>
@@ -146,7 +158,10 @@ export function LessonViewer({ content, className }: LessonViewerProps) {
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight, rehypeRaw]}
+        rehypePlugins={[
+          [rehypeHighlight, { ignoreMissing: true, detect: false }],
+          rehypeRaw,
+        ]}
         components={components}
       >
         {markdown}
