@@ -1,0 +1,393 @@
+---
+title: "Message Queues & Event-Driven Architecture"
+slug: "message-queues"
+track: "system-design"
+module: "system-components"
+difficulty: "Intermediate"
+estimatedMinutes: 45
+prerequisites: ["scalability-basics", "distributed-transactions"]
+---
+
+## Learning Objectives
+
+- Compare message queue architectures: Kafka, RabbitMQ, and SQS
+- Design event-driven architectures with proper message delivery guarantees
+- Analyze the trade-offs between at-most-once, at-least-once, and exactly-once delivery
+- Implement patterns like dead letter queues, fan-out, and backpressure
+- Choose the right messaging system for a given architecture
+
+## Prerequisites
+
+- Understanding of distributed systems and async communication
+- Familiarity with producer-consumer patterns
+- Knowledge of idempotency and distributed transactions
+
+## Why Message Queues?
+
+### Synchronous vs. Asynchronous Communication
+
+```mermaid
+graph LR
+    subgraph "Synchronous (tight coupling)"
+        A1["Order Service"] -->|"HTTP call"| B1["Payment Service"]
+        B1 -->|"HTTP call"| C1["Inventory Service"]
+        B1 -->|"HTTP call"| D1["Email Service"]
+        Note1["If Email Service is down,<br/>entire order fails"]
+    end
+```
+
+```mermaid
+graph LR
+    subgraph "Asynchronous (loose coupling)"
+        A2["Order Service"] -->|"Publish event"| Q["Message Queue"]
+        Q -->|"Subscribe"| B2["Payment Service"]
+        Q -->|"Subscribe"| C2["Inventory Service"]
+        Q -->|"Subscribe"| D2["Email Service"]
+        Note2["Email Service down?<br/>Messages wait. Others unaffected."]
+    end
+```
+
+**Benefits of async messaging**:
+- **Decoupling**: Services don't need to know about each other
+- **Resilience**: Downstream failures don't cascade
+- **Buffering**: Handles traffic spikes by absorbing bursts
+- **Scalability**: Consumers scale independently
+
+## Apache Kafka
+
+### Architecture
+
+Kafka is a **distributed commit log** designed for high-throughput, ordered event streaming:
+
+```mermaid
+graph TD
+    subgraph "Kafka Cluster"
+        subgraph "Topic: orders (3 partitions)"
+            P0["Partition 0<br/>Broker 1"]
+            P1["Partition 1<br/>Broker 2"]
+            P2["Partition 2<br/>Broker 3"]
+        end
+    end
+
+    Prod1["Producer"] -->|"key: user_123"| P0
+    Prod2["Producer"] -->|"key: user_456"| P1
+    Prod3["Producer"] -->|"key: user_789"| P2
+
+    subgraph "Consumer Group A"
+        C1["Consumer 1"] --> P0
+        C2["Consumer 2"] --> P1
+        C3["Consumer 3"] --> P2
+    end
+
+    subgraph "Consumer Group B"
+        C4["Consumer 4"] --> P0
+        C4 --> P1
+        C5["Consumer 5"] --> P2
+    end
+```
+
+**Key concepts**:
+- **Topic**: A named stream of records (like a database table)
+- **Partition**: An ordered, immutable sequence of records. Provides parallelism.
+- **Consumer Group**: A set of consumers that cooperatively read partitions. Each partition is consumed by exactly one consumer in the group.
+- **Offset**: A sequential ID for each record in a partition. Consumers track their position.
+
+### Kafka's Guarantees
+
+```
+Ordering: Guaranteed WITHIN a partition (not across partitions)
+Durability: Configurable replication factor (typically 3)
+Retention: Time-based (7 days default) or size-based
+Delivery: At-least-once (default), exactly-once with transactions
+```
+
+### When to Use Kafka
+
+- Event streaming (user activity, logs, metrics)
+- Event sourcing (storing the full history of changes)
+- Stream processing (real-time aggregations, windowing)
+- Data pipeline (ETL, moving data between systems)
+- High-throughput scenarios (millions of messages/second)
+
+## RabbitMQ
+
+### Architecture
+
+RabbitMQ is a **traditional message broker** implementing AMQP, focused on flexible routing and delivery guarantees:
+
+```mermaid
+graph LR
+    P["Producer"] --> X["Exchange"]
+
+    X -->|"routing_key: order.created"| Q1["Queue: notifications"]
+    X -->|"routing_key: order.created"| Q2["Queue: analytics"]
+    X -->|"routing_key: order.shipped"| Q3["Queue: tracking"]
+
+    Q1 --> C1["Consumer 1"]
+    Q2 --> C2["Consumer 2"]
+    Q3 --> C3["Consumer 3"]
+```
+
+**Exchange types**:
+- **Direct**: Routes by exact routing key match
+- **Topic**: Routes by routing key pattern (`order.*`, `#.error`)
+- **Fanout**: Broadcasts to all bound queues
+- **Headers**: Routes based on message headers
+
+### RabbitMQ vs. Kafka
+
+| Feature | Kafka | RabbitMQ |
+|---------|-------|----------|
+| **Model** | Distributed log | Message broker |
+| **Message retention** | Retained after consumption | Deleted after ACK |
+| **Ordering** | Per partition | Per queue |
+| **Routing** | Topic + partition key | Flexible exchange routing |
+| **Replay** | Yes (seek to any offset) | No (message consumed once) |
+| **Throughput** | Very high (millions/sec) | Moderate (tens of thousands/sec) |
+| **Best for** | Event streaming, data pipelines | Task queues, request-reply |
+| **Complexity** | Higher (cluster management) | Lower (simpler operations) |
+
+## Amazon SQS
+
+### Standard vs. FIFO
+
+```mermaid
+graph TD
+    subgraph "SQS Standard"
+        SQ["Standard Queue"]
+        SQ --> F1["At-least-once delivery"]
+        SQ --> F2["Best-effort ordering"]
+        SQ --> F3["Nearly unlimited throughput"]
+        SQ --> F4["Possible duplicates"]
+    end
+
+    subgraph "SQS FIFO"
+        FQ["FIFO Queue"]
+        FQ --> G1["Exactly-once processing"]
+        FQ --> G2["Strict ordering per group"]
+        FQ --> G3["300 msg/sec (3000 with batching)"]
+        FQ --> G4["Message deduplication"]
+    end
+```
+
+**SQS advantages**: Fully managed, no servers to operate, automatic scaling, pay-per-message pricing. Ideal for cloud-native architectures on AWS.
+
+## Message Delivery Guarantees
+
+### The Three Levels
+
+```mermaid
+graph TD
+    subgraph "Delivery Guarantees"
+        AMO["At-Most-Once<br/>Fire and forget<br/>May lose messages"]
+        ALO["At-Least-Once<br/>Retry until ACK<br/>May see duplicates"]
+        EO["Exactly-Once<br/>No loss, no duplicates<br/>Hardest to achieve"]
+    end
+
+    AMO --> AMO_use["Metrics, logging<br/>Non-critical notifications"]
+    ALO --> ALO_use["Order processing<br/>Email sending<br/>(with idempotency)"]
+    EO --> EO_use["Financial transactions<br/>Kafka transactions<br/>(limited scope)"]
+```
+
+### At-Least-Once with Idempotency
+
+The practical approach: accept duplicates, make consumers idempotent:
+
+```mermaid
+sequenceDiagram
+    participant Queue
+    participant Consumer
+    participant DB
+
+    Queue->>Consumer: Message: {orderId: 123, action: "ship"}
+    Consumer->>DB: Check: was order 123 already shipped?
+    DB-->>Consumer: No
+
+    Consumer->>DB: Ship order 123, mark as shipped
+    Consumer->>Queue: ACK
+
+    Note over Queue: ACK lost (network error)
+    Queue->>Consumer: Redeliver: {orderId: 123, action: "ship"}
+    Consumer->>DB: Check: was order 123 already shipped?
+    DB-->>Consumer: Yes (already processed)
+    Consumer->>Queue: ACK (skip processing)
+```
+
+### Exactly-Once in Kafka
+
+Kafka achieves exactly-once semantics using **idempotent producers** and **transactions**:
+
+```
+Idempotent producer:
+  - Each producer gets a unique ID
+  - Each message gets a sequence number
+  - Broker deduplicates by (producer_id, sequence_number)
+
+Kafka transactions:
+  - Atomic writes across multiple partitions
+  - read-process-write patterns with exactly-once
+  - Requires all consumers to read "read_committed" isolation
+```
+
+This is limited to Kafka-to-Kafka pipelines. Once you leave Kafka (write to a database, call an API), you're back to at-least-once.
+
+## Event-Driven Architecture Patterns
+
+### Event Sourcing
+
+Store **every state change as an event**, not just the current state:
+
+```
+Traditional: UPDATE account SET balance = 950 WHERE id = 123
+
+Event Sourcing:
+  Event 1: AccountCreated {id: 123, balance: 1000}
+  Event 2: MoneyWithdrawn {id: 123, amount: 50}
+  Current state: Replay events → balance = 950
+```
+
+**Benefits**: Full audit trail, ability to rebuild state, temporal queries ("what was the balance yesterday?").
+
+### CQRS (Command Query Responsibility Segregation)
+
+Separate the write model from the read model:
+
+```mermaid
+graph LR
+    Commands["Commands<br/>(writes)"] --> WM["Write Model<br/>(normalized, event store)"]
+    WM -->|"Events"| Queue["Event Bus"]
+    Queue --> RM["Read Model<br/>(denormalized, optimized)"]
+    Queries["Queries<br/>(reads)"] --> RM
+```
+
+**Why**: Write-optimized storage (normalized, ACID) and read-optimized storage (denormalized, fast) serve different needs. CQRS lets you optimize each independently.
+
+### Dead Letter Queue (DLQ)
+
+Messages that repeatedly fail processing go to a DLQ for investigation:
+
+```mermaid
+graph TD
+    Main["Main Queue"] --> Consumer["Consumer"]
+    Consumer -->|"Process OK"| ACK["ACK (delete)"]
+    Consumer -->|"Process fails"| Retry["Retry (back to queue)"]
+    Retry -->|"3 retries failed"| DLQ["Dead Letter Queue"]
+    DLQ --> Alert["Alert ops team"]
+    DLQ --> Manual["Manual investigation"]
+```
+
+**Configure**: Max retry count (3-5), DLQ retention (14 days), alerting on DLQ depth.
+
+### Backpressure
+
+When consumers can't keep up with producers:
+
+```
+Without backpressure:
+  Producer: 10,000 msg/sec
+  Consumer: 5,000 msg/sec
+  Queue grows: 5,000 msg/sec × 3600 sec = 18M messages/hour
+  → Queue fills up, OOM, crash
+
+With backpressure:
+  Option 1: Producer slows down (rate limiting)
+  Option 2: Add more consumers (auto-scaling)
+  Option 3: Drop low-priority messages (load shedding)
+  Option 4: Apply back-pressure (TCP flow control in Kafka)
+```
+
+## Real-World Examples
+
+### LinkedIn (Kafka Origin)
+
+Kafka was built at LinkedIn for handling their activity stream. Today LinkedIn processes:
+- 7+ trillion messages per day
+- 100+ Kafka clusters
+- Used for: activity tracking, metrics, data pipelines, stream processing
+
+### Uber
+
+```mermaid
+graph TD
+    subgraph "Uber's Event Architecture"
+        Trip["Trip Events<br/>(Kafka)"]
+        Trip --> Pricing["Pricing Service"]
+        Trip --> Analytics["Real-time Analytics"]
+        Trip --> ETA["ETA Prediction"]
+        Trip --> Safety["Safety Monitoring"]
+    end
+
+    subgraph "Task Processing"
+        Email["Email Queue<br/>(SQS/similar)"]
+        Email --> Sender["Email Sender Workers"]
+    end
+```
+
+Uber uses Kafka for real-time event streaming (trip events, driver locations) and task queues for async work (emails, push notifications, receipt generation).
+
+## Trade-Off Analysis
+
+### Choosing the Right System
+
+```mermaid
+graph TD
+    Start["What's your use case?"] --> Q1{Need message<br/>replay?}
+    Q1 -->|Yes| Kafka["Kafka<br/>(event log)"]
+    Q1 -->|No| Q2{Need complex<br/>routing?}
+    Q2 -->|Yes| Rabbit["RabbitMQ<br/>(flexible routing)"]
+    Q2 -->|No| Q3{Cloud-native<br/>on AWS?}
+    Q3 -->|Yes| SQS["SQS<br/>(fully managed)"]
+    Q3 -->|No| Q4{High throughput<br/>>100K msg/sec?}
+    Q4 -->|Yes| Kafka
+    Q4 -->|No| Rabbit
+```
+
+## Capacity Estimation
+
+For a notification system sending 1M notifications/day:
+
+```
+Message rate:
+  1M/day = ~12 messages/sec (average)
+  Peak: 10x average = 120 messages/sec
+
+Kafka cluster sizing (if using Kafka):
+  120 msg/sec is tiny for Kafka → 1 broker is sufficient
+  Use 3 brokers for fault tolerance
+  3 partitions for the topic
+
+Queue depth for bursts:
+  If consumer processes 50 msg/sec, and burst is 120 msg/sec:
+  Backlog builds at 70 msg/sec during burst
+  10-minute burst = 42,000 messages queued
+  Storage: 42K × 1KB = ~42 MB (trivial)
+```
+
+## Interview Approach
+
+1. **Identify async workflows**: "Payment processing doesn't need to block the API response"
+2. **Choose the right tool**: Kafka for events, RabbitMQ/SQS for tasks
+3. **Address delivery guarantees**: "At-least-once with idempotent consumers"
+4. **Handle failures**: "DLQ for poison messages, exponential backoff for retries"
+5. **Consider ordering**: "Messages with the same user_id go to the same partition for ordering"
+6. **Plan for scale**: "Consumer group auto-scales based on partition lag"
+
+> **Pro tip**: Don't just say "we'll use a message queue." Specify *which* queue and *why*. "We'll use Kafka for the activity stream because we need replay capability and high throughput, and SQS for email sending because it's simpler and we don't need ordering."
+
+## Key Takeaways
+
+1. **Queues decouple services**: Producer doesn't need to know about consumers. Failures don't cascade.
+2. **Kafka is a log, not a queue**: Messages are retained and replayable. Multiple consumer groups read independently.
+3. **At-least-once + idempotency**: The pragmatic choice for most systems. Exactly-once is limited to specific scenarios.
+4. **DLQs are mandatory**: Always have a plan for messages that can't be processed.
+5. **Ordering requires partitioning**: Kafka guarantees order per partition, not per topic. Use the right partition key.
+6. **Choose by use case**: Kafka for streaming/events, RabbitMQ for routing/tasks, SQS for cloud-native simplicity.
+
+## External Resources
+
+- [Apache Kafka Documentation](https://kafka.apache.org/documentation/)
+- [RabbitMQ Tutorials](https://www.rabbitmq.com/getstarted.html)
+- [AWS SQS Developer Guide](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/)
+- [Designing Event-Driven Systems (Confluent)](https://www.confluent.io/designing-event-driven-systems/)
+- [Martin Kleppmann — Turning the Database Inside Out](https://www.confluent.io/blog/turning-the-database-inside-out-with-apache-samza/)
+- [Uber Engineering — Building Reliable Reprocessing](https://eng.uber.com/reliable-reprocessing/)

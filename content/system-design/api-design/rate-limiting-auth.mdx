@@ -1,0 +1,410 @@
+---
+title: "Rate Limiting & Authentication"
+slug: "rate-limiting-auth"
+track: "system-design"
+module: "api-design"
+difficulty: "Intermediate"
+estimatedMinutes: 45
+prerequisites: ["rest-api-design"]
+---
+
+## Learning Objectives
+
+- Implement rate limiting algorithms: token bucket, sliding window, fixed window
+- Design authentication and authorization flows using OAuth2 and JWT
+- Scale rate limiting across distributed systems using Redis
+- Evaluate API key strategies for partner and third-party access
+- Combine rate limiting with authentication for production-grade API protection
+
+## Prerequisites
+
+- Understanding of REST API design and HTTP headers
+- Familiarity with basic security concepts (encryption, hashing)
+- Knowledge of distributed systems and caching
+
+## Rate Limiting
+
+### Why Rate Limit?
+
+Without rate limiting, a single client can:
+- **Exhaust resources**: Millions of requests crash your servers
+- **Deny service to others**: One client consumes all capacity
+- **Run up costs**: Cloud billing based on request count or compute
+- **Abuse APIs**: Scraping, brute-force attacks, spam
+
+### Rate Limiting Headers
+
+Well-designed APIs communicate rate limits clearly:
+
+```http
+HTTP/1.1 200 OK
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 742
+X-RateLimit-Reset: 1699876543
+
+# When limit is exceeded:
+HTTP/1.1 429 Too Many Requests
+Retry-After: 30
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1699876543
+```
+
+## Rate Limiting Algorithms
+
+### 1. Token Bucket
+
+A bucket holds tokens. Each request consumes one token. Tokens are added at a fixed rate. If the bucket is empty, the request is rejected.
+
+```mermaid
+graph TD
+    subgraph "Token Bucket"
+        Bucket["Bucket<br/>Capacity: 10 tokens<br/>Current: 7 tokens"]
+        Refill["Refill Rate<br/>2 tokens/second"]
+    end
+
+    Req["Request arrives"] --> Check{"Tokens > 0?"}
+    Check -->|"Yes"| Accept["Accept request<br/>Remove 1 token"]
+    Check -->|"No"| Reject["Reject (429)"]
+    Refill -->|"Every 500ms"| Bucket
+```
+
+```python
+class TokenBucket:
+    def __init__(self, capacity, refill_rate):
+        self.capacity = capacity
+        self.tokens = capacity
+        self.refill_rate = refill_rate  # tokens per second
+        self.last_refill = time.time()
+
+    def allow(self):
+        now = time.time()
+        elapsed = now - self.last_refill
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
+        self.last_refill = now
+
+        if self.tokens >= 1:
+            self.tokens -= 1
+            return True
+        return False
+```
+
+**Pros**: Allows bursts (up to bucket capacity), simple, memory-efficient.
+**Cons**: Requires storing per-client state.
+**Used by**: AWS API Gateway, Stripe.
+
+### 2. Fixed Window Counter
+
+Count requests in fixed time windows (e.g., per minute):
+
+```
+Window: 10:00:00 - 10:01:00 → 95 requests (limit: 100)
+Window: 10:01:00 - 10:02:00 → 0 requests (counter reset)
+
+Problem at window boundary:
+  10:00:59 → 100 requests (full limit)
+  10:01:00 → 100 requests (new window, counter reset)
+  → 200 requests in 2 seconds!
+```
+
+**Pros**: Very simple, low memory.
+**Cons**: Boundary burst problem (2x the limit at window edges).
+
+### 3. Sliding Window Log
+
+Store the timestamp of every request. Count requests within the sliding window:
+
+```
+Limit: 100 requests per minute
+
+Timestamps: [10:00:01, 10:00:05, 10:00:15, ..., 10:00:58]
+New request at 10:01:02:
+  Remove timestamps older than 10:00:02
+  Count remaining: 87
+  87 < 100 → Allow, add 10:01:02 to log
+```
+
+**Pros**: Perfectly accurate, no boundary problem.
+**Cons**: Memory-intensive (stores every timestamp). For 10M users × 100 requests = 1B timestamps.
+
+### 4. Sliding Window Counter
+
+Hybrid of fixed window and sliding window. Uses counters from current and previous windows, weighted by position in the window:
+
+```
+Previous window (10:00-10:01): 84 requests
+Current window  (10:01-10:02): 36 requests
+Current position: 15 seconds into the window (25% through)
+
+Weighted count = 84 × (1 - 0.25) + 36 = 84 × 0.75 + 36 = 63 + 36 = 99
+
+99 < 100 limit → Allow
+```
+
+**Pros**: Accurate (approximation), low memory, no boundary bursts.
+**Cons**: Slightly approximate (usually within 1% of actual).
+**Used by**: Cloudflare.
+
+### Algorithm Comparison
+
+| Algorithm | Memory | Accuracy | Burst Handling | Complexity |
+|-----------|--------|----------|---------------|------------|
+| Token Bucket | Low | Good | Allows controlled bursts | Low |
+| Fixed Window | Very Low | Poor at edges | Boundary bursts | Very Low |
+| Sliding Window Log | High | Perfect | No bursts | Medium |
+| Sliding Window Counter | Low | ~99% accurate | Smooth | Low |
+
+## Distributed Rate Limiting
+
+### The Multi-Server Challenge
+
+With multiple API servers, each tracking limits locally doesn't work:
+
+```
+Server A: user has 90/100 requests (local count)
+Server B: user has 85/100 requests (local count)
+→ User actually made 175 requests, well over the 100 limit!
+```
+
+### Redis-Based Solution
+
+Centralize rate limit state in Redis:
+
+```mermaid
+graph TD
+    C["Client"] --> LB["Load Balancer"]
+    LB --> S1["API Server 1"]
+    LB --> S2["API Server 2"]
+    LB --> S3["API Server 3"]
+
+    S1 --> Redis[("Redis<br/>Rate Limit State")]
+    S2 --> Redis
+    S3 --> Redis
+```
+
+```lua
+-- Redis Lua script for atomic rate limiting (sliding window counter)
+local key = KEYS[1]
+local window = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+
+-- Remove old entries
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+
+-- Count current entries
+local count = redis.call('ZCARD', key)
+
+if count < limit then
+    redis.call('ZADD', key, now, now .. math.random())
+    redis.call('EXPIRE', key, window)
+    return 1  -- allowed
+else
+    return 0  -- rejected
+end
+```
+
+### Rate Limiting at Scale
+
+For 10M users with per-user rate limits:
+
+```
+Redis memory estimate:
+  Key: "rate:user_123" (~20 bytes)
+  Value: counter + TTL (~16 bytes)
+  10M keys × 36 bytes ≈ 360 MB
+
+Redis can handle: 100K+ operations/sec on a single instance
+  → One Redis instance supports 100K API requests/sec
+  → For higher throughput, shard by user_id across Redis Cluster
+```
+
+## Authentication
+
+### API Keys
+
+Simplest form of authentication. A long random string identifying the client:
+
+```http
+GET /v1/products HTTP/1.1
+Authorization: Bearer sk_live_abc123def456
+```
+
+**Characteristics**:
+- Identify the application, not the user
+- Easy to rotate and revoke
+- Should be treated like passwords (never committed to code)
+- Often used with rate limiting (different limits per API key tier)
+
+**Stripe's key convention**: `sk_live_*` (secret, production), `sk_test_*` (secret, test), `pk_live_*` (publishable, client-safe).
+
+### OAuth 2.0
+
+The standard for delegated authorization. A user grants a third-party app limited access to their data:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant App as Third-Party App
+    participant Auth as Auth Server
+    participant API as Resource Server
+
+    User->>App: "Log in with Google"
+    App->>Auth: Redirect to Google login
+    Auth->>User: "Grant access to App?"
+    User->>Auth: "Yes, allow"
+    Auth->>App: Authorization code
+    App->>Auth: Exchange code for tokens
+    Auth->>App: Access token + Refresh token
+    App->>API: GET /user/profile (Bearer token)
+    API->>API: Validate token
+    API->>App: User profile data
+```
+
+### OAuth 2.0 Grant Types
+
+| Grant Type | Use Case | Security |
+|-----------|----------|----------|
+| **Authorization Code** | Web apps with backend | Most secure |
+| **Authorization Code + PKCE** | Mobile/SPA (no secret) | Secure for public clients |
+| **Client Credentials** | Service-to-service | No user involved |
+| **Refresh Token** | Renew expired access tokens | Long-lived session |
+
+> **Interview Tip**: Never use the "Implicit" grant type — it's deprecated for security reasons. Always use Authorization Code with PKCE for browser/mobile apps.
+
+### JWT (JSON Web Tokens)
+
+A self-contained token that carries claims about the user:
+
+```
+eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.     ← Header (algorithm, type)
+eyJzdWIiOiJ1c2VyXzEyMyIsImVtYWlsIjoiYWxp   ← Payload (claims)
+Y2VAZXhhbXBsZS5jb20iLCJyb2xlIjoiYWRtaW4i
+LCJpYXQiOjE2OTk4NzY1NDMsImV4cCI6MTY5OTg4
+MDE0M30.
+kP3L9q8...                                   ← Signature (verified by server)
+```
+
+```json
+// Decoded payload
+{
+  "sub": "user_123",
+  "email": "alice@example.com",
+  "role": "admin",
+  "iat": 1699876543,
+  "exp": 1699880143
+}
+```
+
+### JWT vs. Opaque Tokens
+
+```mermaid
+graph TD
+    subgraph "JWT (Self-Contained)"
+        J1["API receives JWT"]
+        J2["Verify signature locally<br/>(no DB/auth server call)"]
+        J3["Extract claims from payload"]
+        J4["Check expiry"]
+        J1 --> J2 --> J3 --> J4
+    end
+
+    subgraph "Opaque Token"
+        O1["API receives token"]
+        O2["Call auth server:<br/>validate token"]
+        O3["Auth server returns<br/>user info"]
+        O1 --> O2 --> O3
+    end
+```
+
+| Aspect | JWT | Opaque Token |
+|--------|-----|-------------|
+| **Validation** | Local (verify signature) | Remote (call auth server) |
+| **Revocation** | Hard (wait for expiry) | Easy (delete from store) |
+| **Size** | Large (~1KB) | Small (~32 bytes) |
+| **Latency** | No network call | Extra network hop |
+| **Stateless** | Yes | No (server stores state) |
+
+**Best practice**: Short-lived JWTs (15 minutes) + refresh tokens. This limits the window of vulnerability if a JWT is compromised, while avoiding the overhead of remote validation on every request.
+
+### JWT Revocation Strategies
+
+Since JWTs can't be invalidated before expiry, use these approaches:
+
+1. **Short expiry**: 15-minute JWTs; clients refresh frequently
+2. **Token blocklist**: Store revoked JWTs in Redis (check on each request — defeats the purpose)
+3. **Token versioning**: Increment user's token version on logout; reject JWTs with old versions
+4. **Sliding sessions**: Issue new JWTs on every authenticated request
+
+## Combining Rate Limiting and Auth
+
+### Layered Defense
+
+```mermaid
+graph TD
+    Req["Incoming Request"] --> Edge["Edge Rate Limit<br/>(IP-based, Cloudflare)"]
+    Edge --> Auth["Authentication<br/>(validate JWT/API key)"]
+    Auth --> UserRL["User Rate Limit<br/>(per-user, Redis)"]
+    UserRL --> Tier["Tier Enforcement<br/>(free: 100/min<br/>pro: 1000/min<br/>enterprise: 10000/min)"]
+    Tier --> App["Application Logic"]
+```
+
+### Rate Limit by Identity
+
+```
+Anonymous (by IP):        100 requests/hour
+Free tier (by user_id):   1,000 requests/hour
+Pro tier (by user_id):    10,000 requests/hour
+Enterprise (by API key):  100,000 requests/hour
+Internal services:        No limit (trusted network)
+```
+
+## Real-World Examples
+
+### GitHub API Rate Limiting
+
+```http
+X-RateLimit-Limit: 5000
+X-RateLimit-Remaining: 4987
+X-RateLimit-Reset: 1699876543
+X-RateLimit-Used: 13
+X-RateLimit-Resource: core
+```
+
+GitHub uses per-user rate limits: 60/hour unauthenticated, 5,000/hour with a token, with separate limits for search, GraphQL, and code scanning.
+
+### Stripe Authentication
+
+Stripe combines multiple layers:
+- **API keys** for authentication (secret keys server-side, publishable keys client-side)
+- **Idempotency keys** for safe retries
+- **Rate limiting** at 100 requests/second per key
+- **Webhook signatures** for verifying event authenticity (HMAC-SHA256)
+
+## Interview Approach
+
+1. **Start with the threat model**: What are you protecting against? DDoS? Abuse? Cost overrun?
+2. **Choose the algorithm**: Token bucket for most APIs, sliding window counter for precision
+3. **Centralize with Redis**: For multi-server deployments, use Redis for shared state
+4. **Layer your defenses**: IP-level at edge, user-level after auth, endpoint-level for sensitive operations
+5. **JWT for auth**: Short-lived JWTs with refresh tokens, validated at the API gateway
+
+> **Pro tip**: "We'll use token bucket rate limiting in Redis, with different limits per user tier. JWTs with 15-minute expiry handle authentication, validated at the API gateway before reaching backend services."
+
+## Key Takeaways
+
+1. **Token bucket is the go-to**: Allows bursts, simple to implement, used by AWS and Stripe.
+2. **Redis enables distributed rate limiting**: Centralized state, atomic operations via Lua scripts.
+3. **JWT for stateless auth**: No database lookup per request, but plan for revocation.
+4. **Layer rate limits**: IP → user → endpoint → tier. Each layer catches different abuse patterns.
+5. **OAuth 2.0 + PKCE for delegated auth**: The modern standard for third-party access.
+6. **Communicate limits clearly**: Use standard HTTP headers so clients can self-throttle.
+
+## External Resources
+
+- [Token Bucket Algorithm (Wikipedia)](https://en.wikipedia.org/wiki/Token_bucket)
+- [Stripe Rate Limiting](https://stripe.com/docs/rate-limits)
+- [OAuth 2.0 Simplified](https://www.oauth.com/)
+- [JWT.io — Debugger & Introduction](https://jwt.io/introduction)
+- [Cloudflare Rate Limiting](https://developers.cloudflare.com/waf/rate-limiting-rules/)
+- [GitHub API Rate Limits](https://docs.github.com/en/rest/rate-limit)
+- [RFC 6585 — 429 Too Many Requests](https://tools.ietf.org/html/rfc6585)

@@ -1,0 +1,70 @@
+{
+  "module_slug": "fundamentals",
+  "questions": [
+    {
+      "id": "q1",
+      "text": "What is the main advantage of horizontal scaling over vertical scaling?",
+      "options": [
+        "It requires no code changes to the application",
+        "It's always cheaper than vertical scaling",
+        "There's no hard ceiling on capacity — you can keep adding machines",
+        "It provides stronger consistency guarantees"
+      ],
+      "correct": "There's no hard ceiling on capacity — you can keep adding machines",
+      "explanation": "Vertical scaling hits a hard limit (the most powerful single machine available). Horizontal scaling has no theoretical ceiling — you can keep adding machines. However, it does require designing stateless services and adds distributed system complexity.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q2",
+      "text": "In the cache-aside pattern, what happens when there's a cache miss?",
+      "options": [
+        "The request fails and returns an error to the client",
+        "The application queries the database, returns the result, and populates the cache for future requests",
+        "The cache automatically fetches from the database",
+        "The load balancer routes the request to a different server that has the data cached"
+      ],
+      "correct": "The application queries the database, returns the result, and populates the cache for future requests",
+      "explanation": "In cache-aside (lazy loading), the application is responsible for managing the cache. On a miss, the app queries the database, writes the result to the cache, and returns it to the client. The cache itself is passive — it doesn't know about the database.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q3",
+      "text": "Why is the 'left-most prefix' rule important for composite database indexes?",
+      "options": [
+        "It determines which column stores the primary key",
+        "A composite index on (A, B, C) can only be used for queries that filter on A, or A+B, or A+B+C — not B or C alone",
+        "It ensures that string columns are indexed alphabetically",
+        "It controls the order in which shards are queried"
+      ],
+      "correct": "A composite index on (A, B, C) can only be used for queries that filter on A, or A+B, or A+B+C — not B or C alone",
+      "explanation": "B-tree composite indexes are organized hierarchically: first by column A, then by B within each A value, then by C within each (A,B) pair. A query filtering only on B or C can't use this index because the first level (A) is skipped. Column order in the index definition matters.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q4",
+      "text": "What is the biggest challenge with hash-based sharding?",
+      "options": [
+        "Uneven data distribution across shards",
+        "Adding or removing shards requires rehashing and redistributing all data",
+        "It cannot handle range queries at all",
+        "It requires a central directory service"
+      ],
+      "correct": "Adding or removing shards requires rehashing and redistributing all data",
+      "explanation": "With simple hash(key) % N sharding, changing N means almost every key maps to a different shard, requiring massive data redistribution. This is mitigated by consistent hashing, which only redistributes ~1/N of keys when adding a shard. However, cross-shard queries and range queries are also challenges worth noting.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q5",
+      "text": "In a quorum-based replication system with N=3 nodes, what values of W (write quorum) and R (read quorum) guarantee reading the latest write?",
+      "options": [
+        "W=1, R=1",
+        "W=1, R=3",
+        "W=2, R=2",
+        "Both W=1 R=3 and W=2 R=2"
+      ],
+      "correct": "Both W=1 R=3 and W=2 R=2",
+      "explanation": "The quorum rule is W + R > N. With N=3: W=1+R=3=4>3 ✓ and W=2+R=2=4>3 ✓. Both satisfy the condition, ensuring that the set of nodes read from overlaps with the set of nodes written to, guaranteeing at least one read returns the latest value. W=1, R=1 gives 2, which is not > 3.",
+      "type": "single_choice"
+    }
+  ]
+}

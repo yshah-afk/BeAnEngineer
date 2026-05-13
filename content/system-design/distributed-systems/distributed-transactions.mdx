@@ -1,0 +1,450 @@
+---
+title: "Distributed Transactions"
+slug: "distributed-transactions"
+track: "system-design"
+module: "distributed-systems"
+difficulty: "Advanced"
+estimatedMinutes: 50
+prerequisites: ["cap-theorem-consistency", "distributed-consensus"]
+---
+
+## Learning Objectives
+
+- Explain the challenges of transactions across multiple services or databases
+- Compare Two-Phase Commit (2PC) with saga-based patterns and their trade-offs
+- Design idempotent operations for safe retries in distributed systems
+- Implement the transactional outbox pattern for reliable event publishing
+- Choose the right distributed transaction approach for a given architecture
+
+## Prerequisites
+
+- Understanding of ACID transactions in single-database systems
+- Familiarity with microservices communication patterns
+- Knowledge of consensus and consistency models
+
+## The Distributed Transaction Problem
+
+### Why Single-Node Transactions Don't Scale
+
+In a monolith with a single database, transactions are straightforward:
+
+```sql
+BEGIN TRANSACTION;
+  UPDATE accounts SET balance = balance - 100 WHERE id = 'alice';
+  UPDATE accounts SET balance = balance + 100 WHERE id = 'bob';
+COMMIT;
+```
+
+In a microservices architecture, Alice's account might be in the Payment Service and Bob's in the Wallet Service, each with its own database:
+
+```mermaid
+graph LR
+    subgraph "Service A: Payments"
+        PA["Payment API"]
+        DA[("Payment DB")]
+    end
+
+    subgraph "Service B: Wallet"
+        WA["Wallet API"]
+        DB[("Wallet DB")]
+    end
+
+    PA -->|"Debit Alice"| DA
+    PA -->|"Credit Bob"| WA
+    WA --> DB
+
+    style DA fill:#ffcccc
+    style DB fill:#ccccff
+```
+
+There's no single transaction coordinator. If the debit succeeds but the credit fails, the system is in an inconsistent state. Alice lost money that Bob never received.
+
+## Two-Phase Commit (2PC)
+
+### How 2PC Works
+
+2PC uses a **coordinator** to ensure all participants either commit or abort:
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant P1 as Participant 1<br/>(Payment DB)
+    participant P2 as Participant 2<br/>(Wallet DB)
+
+    Note over C,P2: Phase 1: Prepare (Voting)
+    C->>P1: PREPARE
+    C->>P2: PREPARE
+    P1->>P1: Write to WAL, lock rows
+    P2->>P2: Write to WAL, lock rows
+    P1-->>C: VOTE YES
+    P2-->>C: VOTE YES
+
+    Note over C: All voted YES
+    Note over C,P2: Phase 2: Commit
+
+    C->>C: Log COMMIT decision
+    C->>P1: COMMIT
+    C->>P2: COMMIT
+    P1->>P1: Apply changes, release locks
+    P2->>P2: Apply changes, release locks
+    P1-->>C: ACK
+    P2-->>C: ACK
+```
+
+If any participant votes NO, the coordinator sends ABORT to everyone.
+
+### 2PC Failure Scenarios
+
+```mermaid
+graph TD
+    subgraph "What Can Go Wrong"
+        F1["Participant crashes<br/>after PREPARE"] -->|"Coordinator waits,<br/>then aborts"| R1["Other participants<br/>hold locks"]
+        F2["Coordinator crashes<br/>after PREPARE"] -->|"Participants are<br/>stuck (in-doubt)"| R2["Blocking! Locks<br/>held indefinitely"]
+        F3["Network partition<br/>during Phase 2"] -->|"Some commit,<br/>some don't know"| R3["Inconsistency<br/>until recovery"]
+    end
+
+    style F2 fill:#ff9999
+    style R2 fill:#ff9999
+```
+
+### 2PC Limitations
+
+| Problem | Impact |
+|---------|--------|
+| **Blocking** | If the coordinator crashes after PREPARE, participants hold locks indefinitely |
+| **Latency** | At least 2 round trips; all participants must respond |
+| **Availability** | System is unavailable if coordinator or any participant is down |
+| **Scalability** | Locks span multiple databases; contention increases with participants |
+
+> **Interview Tip**: 2PC is rarely used across microservices. It's used *within* databases (e.g., distributed SQL databases like CockroachDB use it internally). For microservices, prefer sagas.
+
+## The Saga Pattern
+
+### Choreography vs. Orchestration
+
+Sagas break a distributed transaction into a sequence of **local transactions**, each with a **compensating transaction** to undo its effects if a later step fails.
+
+```mermaid
+graph TD
+    subgraph "Saga: Order Placement"
+        T1["1. Create Order<br/>(Order Service)"]
+        T2["2. Reserve Inventory<br/>(Inventory Service)"]
+        T3["3. Process Payment<br/>(Payment Service)"]
+        T4["4. Ship Order<br/>(Shipping Service)"]
+    end
+
+    subgraph "Compensating Transactions"
+        C1["Cancel Order"]
+        C2["Release Inventory"]
+        C3["Refund Payment"]
+    end
+
+    T1 --> T2 --> T3 --> T4
+    T3 -.->|"Payment fails"| C2
+    C2 -.-> C1
+```
+
+### Choreography-Based Saga
+
+Each service listens for events and decides what to do next:
+
+```mermaid
+sequenceDiagram
+    participant OS as Order Service
+    participant IS as Inventory Service
+    participant PS as Payment Service
+    participant SS as Shipping Service
+    participant Q as Message Broker
+
+    OS->>Q: OrderCreated event
+    Q->>IS: OrderCreated
+    IS->>IS: Reserve inventory
+    IS->>Q: InventoryReserved event
+    Q->>PS: InventoryReserved
+    PS->>PS: Charge customer
+    PS->>Q: PaymentProcessed event
+    Q->>SS: PaymentProcessed
+    SS->>SS: Create shipment
+    SS->>Q: OrderShipped event
+
+    Note over OS,SS: If Payment fails:
+    PS->>Q: PaymentFailed event
+    Q->>IS: PaymentFailed
+    IS->>IS: Release inventory
+    IS->>Q: InventoryReleased event
+    Q->>OS: InventoryReleased
+    OS->>OS: Cancel order
+```
+
+**Pros**: Loose coupling, no central coordinator, easy to add new steps.
+**Cons**: Hard to understand the full flow, difficult to debug, risk of cyclic dependencies.
+
+### Orchestration-Based Saga
+
+A central **saga orchestrator** coordinates the steps:
+
+```mermaid
+sequenceDiagram
+    participant SO as Saga Orchestrator
+    participant OS as Order Service
+    participant IS as Inventory Service
+    participant PS as Payment Service
+
+    SO->>OS: Create order
+    OS-->>SO: Order created
+
+    SO->>IS: Reserve inventory
+    IS-->>SO: Inventory reserved
+
+    SO->>PS: Process payment
+    PS-->>SO: Payment failed!
+
+    Note over SO: Trigger compensation
+
+    SO->>IS: Release inventory
+    IS-->>SO: Inventory released
+
+    SO->>OS: Cancel order
+    OS-->>SO: Order cancelled
+```
+
+**Pros**: Clear control flow, easy to reason about, centralized error handling.
+**Cons**: Orchestrator is a single point of complexity, risk of becoming a "god service."
+
+### Choosing Between Choreography and Orchestration
+
+| Factor | Choreography | Orchestration |
+|--------|-------------|---------------|
+| **Coupling** | Loose | Tighter (via orchestrator) |
+| **Complexity** | Distributed across services | Centralized in orchestrator |
+| **Debugging** | Hard (follow event chains) | Easier (single point of control) |
+| **Best for** | Simple flows (2-3 steps) | Complex flows (4+ steps) |
+| **Examples** | Simple e-commerce checkout | Travel booking (flight + hotel + car) |
+
+## The Transactional Outbox Pattern
+
+### The Dual-Write Problem
+
+A common mistake: writing to the database AND publishing an event as two separate operations.
+
+```
+// DANGEROUS: Dual write
+await database.save(order);        // Step 1: succeeds
+await messageBroker.publish(event); // Step 2: fails! → inconsistency
+```
+
+If step 1 succeeds but step 2 fails, the order exists in the database but no event was published. Other services never learn about it.
+
+### Outbox Solution
+
+Write the event to an **outbox table** in the same database transaction as the business data. A separate process reads the outbox and publishes events:
+
+```mermaid
+graph LR
+    subgraph "Order Service"
+        API["API Handler"]
+        subgraph "Single DB Transaction"
+            OT["Orders Table"]
+            OB["Outbox Table"]
+        end
+        Relay["Outbox Relay<br/>(CDC or Polling)"]
+    end
+    MQ["Message Broker"]
+
+    API -->|"1. Write order +<br/>outbox entry"| OT
+    API -->|"Same TX"| OB
+    Relay -->|"2. Read outbox"| OB
+    Relay -->|"3. Publish event"| MQ
+    Relay -->|"4. Mark as sent"| OB
+```
+
+```sql
+-- Single atomic transaction
+BEGIN;
+  INSERT INTO orders (id, customer_id, total) VALUES ('ord-123', 'cust-456', 99.99);
+  INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload)
+    VALUES (gen_id(), 'Order', 'ord-123', 'OrderCreated', '{"orderId": "ord-123", ...}');
+COMMIT;
+```
+
+The relay process can use **Change Data Capture (CDC)** tools like Debezium to tail the database transaction log, or simply poll the outbox table.
+
+## Idempotency
+
+### Why Idempotency Matters
+
+In distributed systems, messages can be delivered **more than once** due to retries, network issues, or broker redelivery. Every operation must be safe to execute multiple times with the same result.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+
+    Client->>Server: POST /payments (idempotency-key: abc-123)
+    Server->>Server: Process payment
+    Server--xClient: Response lost (network error)
+
+    Note over Client: Timeout → Retry
+
+    Client->>Server: POST /payments (idempotency-key: abc-123)
+    Server->>Server: Check: abc-123 already processed
+    Server-->>Client: Return cached result (no double charge)
+```
+
+### Idempotency Implementation Strategies
+
+**1. Idempotency Keys** (Stripe's approach):
+
+```
+Client sends: POST /v1/charges
+Headers: Idempotency-Key: unique-request-id-123
+
+Server:
+  1. Check if key exists in idempotency store
+  2. If yes → return stored response
+  3. If no → process request, store response with key
+  4. Keys expire after 24 hours
+```
+
+**2. Database Constraints**:
+
+```sql
+-- Unique constraint prevents duplicate processing
+INSERT INTO payments (idempotency_key, amount, status)
+VALUES ('abc-123', 100, 'completed')
+ON CONFLICT (idempotency_key) DO NOTHING;
+```
+
+**3. Conditional Updates**:
+
+```sql
+-- Only debit if current balance matches expected value
+UPDATE accounts
+SET balance = balance - 100, version = version + 1
+WHERE id = 'alice' AND version = 5;
+-- If version changed, someone else modified it → retry with new version
+```
+
+## Compensating Transactions
+
+### Designing Compensations
+
+Not every operation has a natural "undo." Compensating transactions provide **semantic reversal**, not necessarily a technical rollback:
+
+| Original Action | Compensation |
+|-----------------|-------------|
+| Create order | Cancel order (set status to CANCELLED) |
+| Charge credit card | Issue refund |
+| Reserve inventory | Release reservation |
+| Send email | Send cancellation email (can't unsend!) |
+| Ship package | Create return label |
+
+### Compensation Challenges
+
+1. **Non-reversible operations**: You can't unsend an email or un-ship a package. Design for this with corrective actions.
+2. **Ordering**: Compensations must run in reverse order of the original saga steps.
+3. **Compensation failures**: What if the compensation itself fails? You need retry logic and potentially manual intervention.
+
+```mermaid
+graph TD
+    SF["Saga Step Fails"] --> RC["Run Compensations<br/>in Reverse Order"]
+    RC --> CF{Compensation<br/>Fails?}
+    CF -->|"No"| Done["Saga Rolled Back"]
+    CF -->|"Yes"| Retry["Retry with<br/>Exponential Backoff"]
+    Retry --> CF2{Still Failing?}
+    CF2 -->|"No"| Done
+    CF2 -->|"Yes"| DLQ["Dead Letter Queue<br/>+ Manual Intervention"]
+```
+
+## Real-World Examples
+
+### Uber's Saga Architecture
+
+Uber's trip lifecycle is a saga:
+
+1. **Match rider to driver** → Compensation: release driver
+2. **Start trip** → Compensation: cancel trip
+3. **Calculate fare** → Compensation: void fare
+4. **Charge rider** → Compensation: refund
+5. **Pay driver** → Compensation: debit driver
+
+Each step is a local transaction in a separate microservice. Uber uses an orchestrator called **Cadence** (now Temporal) to manage saga state.
+
+### Stripe's Idempotency
+
+Stripe processes billions in payments. Their idempotency design:
+
+- Every API request accepts an `Idempotency-Key` header
+- Keys are stored with request parameters and response
+- If a retried request has different parameters but the same key, Stripe returns a 422 error
+- Keys expire after 24 hours
+- Internally, Stripe uses a state machine to track request lifecycle
+
+## Trade-Off Analysis
+
+### Comparing Approaches
+
+| Approach | Consistency | Availability | Complexity | Best For |
+|----------|------------|-------------|------------|----------|
+| **2PC** | Strong (ACID) | Low (blocking) | Medium | Single-database distributed SQL |
+| **Saga (Choreography)** | Eventual | High | High (debugging) | Simple, loosely coupled flows |
+| **Saga (Orchestration)** | Eventual | High | Medium | Complex multi-step workflows |
+| **Outbox + CDC** | Eventual (reliable) | High | Medium | Reliable event publishing |
+
+### When to Use What
+
+```mermaid
+graph TD
+    Start["Need distributed<br/>transaction?"] --> Q1{Same database<br/>or different?}
+    Q1 -->|"Same DB"| ACID["Use DB transactions<br/>(ACID)"]
+    Q1 -->|"Different DBs"| Q2{Need strong<br/>consistency?}
+    Q2 -->|"Yes"| TwoPC["Consider 2PC<br/>(accept limitations)"]
+    Q2 -->|"Eventual OK"| Q3{How many<br/>steps?}
+    Q3 -->|"2-3 steps"| Choreo["Choreography Saga"]
+    Q3 -->|"4+ steps"| Orch["Orchestration Saga"]
+
+    Orch --> Outbox["+ Outbox Pattern<br/>for reliable events"]
+    Choreo --> Outbox
+```
+
+## Capacity Estimation
+
+For a payment system processing 10,000 transactions/second:
+
+| Component | Estimate |
+|-----------|----------|
+| Idempotency key storage | 10K keys/sec × 86,400 sec × 1KB = ~860 GB/day (expire after 24h) |
+| Outbox table throughput | 10K writes/sec (same as transactions) |
+| Saga orchestrator state | 10K active sagas × 2KB state = ~20 MB in memory |
+| Compensation rate | ~0.1-1% of transactions = 10-100 compensations/sec |
+
+## Interview Approach
+
+When designing a system with cross-service transactions:
+
+1. **Acknowledge the problem**: "We can't use a single ACID transaction across services"
+2. **Choose your pattern**: Sagas for most microservice architectures
+3. **Handle failures explicitly**: Define compensating transactions for each step
+4. **Ensure idempotency**: Every operation must be safe to retry
+5. **Use the outbox pattern**: For reliable event publishing
+6. **Consider observability**: How will you track saga state and debug failures?
+
+> **Pro tip**: Draw the happy path first, then show what happens when step 3 of 5 fails. This demonstrates you think about failure modes, which is exactly what interviewers want to see.
+
+## Key Takeaways
+
+1. **2PC is a last resort**: It's blocking, slow, and reduces availability. Use it only within a single database system.
+2. **Sagas are the standard**: For microservices, use sagas with compensating transactions.
+3. **Orchestration over choreography**: For complex flows, an orchestrator (like Temporal) is easier to reason about and debug.
+4. **Outbox pattern prevents data loss**: Never do dual writes. Use the outbox table within the same transaction.
+5. **Idempotency is mandatory**: Every external-facing API and message handler must be idempotent.
+6. **Design compensations early**: Think about how to undo each step before implementing the happy path.
+
+## External Resources
+
+- [Saga Pattern — Chris Richardson (Microservices.io)](https://microservices.io/patterns/data/saga.html)
+- [Transactional Outbox Pattern](https://microservices.io/patterns/data/transactional-outbox.html)
+- [Stripe Idempotent Requests](https://stripe.com/docs/api/idempotent_requests)
+- [Temporal.io — Durable Execution](https://temporal.io/)
+- [Designing Data-Intensive Applications — Ch. 9](https://dataintensive.net/)
+- [Life Beyond Distributed Transactions — Pat Helland](https://queue.acm.org/detail.cfm?id=3025012)

@@ -1,0 +1,70 @@
+{
+  "module_slug": "foundations",
+  "questions": [
+    {
+      "id": "q1",
+      "text": "In Byte-Pair Encoding (BPE), what determines which token pair gets merged next?",
+      "options": [
+        "The pair with the highest mutual information score",
+        "The most frequently occurring adjacent pair in the corpus",
+        "The pair that maximizes the unigram language model likelihood",
+        "A randomly selected pair from the top-10 most frequent"
+      ],
+      "correct": "The most frequently occurring adjacent pair in the corpus",
+      "explanation": "BPE iteratively merges the most frequently occurring adjacent pair of tokens. This is what distinguishes it from WordPiece, which uses likelihood-based merging.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q2",
+      "text": "What is the key advantage of contextual embeddings (e.g., from BERT) over static embeddings (e.g., Word2Vec)?",
+      "options": [
+        "Contextual embeddings use fewer dimensions",
+        "Contextual embeddings produce different vectors for the same word depending on surrounding context",
+        "Contextual embeddings are always more accurate for word analogy tasks",
+        "Contextual embeddings don't require a fixed vocabulary"
+      ],
+      "correct": "Contextual embeddings produce different vectors for the same word depending on surrounding context",
+      "explanation": "The defining feature of contextual embeddings is that the vector for a word changes based on its context. 'Bank' in 'river bank' gets a different embedding than 'bank' in 'bank account,' whereas Word2Vec assigns the same vector regardless of context.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q3",
+      "text": "Why is the attention score divided by √d_k in the scaled dot-product attention formula?",
+      "options": [
+        "To normalize the output vectors to unit length",
+        "To reduce computational cost by using smaller numbers",
+        "To prevent dot products from growing large and saturating the softmax function",
+        "To ensure the attention weights are always positive"
+      ],
+      "correct": "To prevent dot products from growing large and saturating the softmax function",
+      "explanation": "When d_k is large, dot products can become very large in magnitude, pushing softmax outputs toward 0 and 1 (saturated regions where gradients vanish). Dividing by √d_k keeps the variance of scores at approximately 1, maintaining healthy gradient flow.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q4",
+      "text": "In multi-head attention with d_model=512 and 8 heads, what is the dimension of each head's key vector (d_k)?",
+      "options": [
+        "512",
+        "64",
+        "8",
+        "4096"
+      ],
+      "correct": "64",
+      "explanation": "In multi-head attention, the model dimension is split equally across heads: d_k = d_model / num_heads = 512 / 8 = 64. Each head operates on a 64-dimensional subspace, and the results are concatenated back to 512 dimensions.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q5",
+      "text": "What is the purpose of the causal mask in decoder-only transformer models like GPT?",
+      "options": [
+        "To reduce memory usage during training",
+        "To prevent each token from attending to future tokens in the sequence",
+        "To improve the quality of positional encodings",
+        "To filter out padding tokens in variable-length batches"
+      ],
+      "correct": "To prevent each token from attending to future tokens in the sequence",
+      "explanation": "The causal mask sets attention scores to -∞ for all positions after the current token, ensuring that when predicting the next token, the model can only use information from previous tokens. This maintains the autoregressive property needed for text generation.",
+      "type": "single_choice"
+    }
+  ]
+}

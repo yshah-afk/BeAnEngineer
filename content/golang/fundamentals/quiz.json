@@ -1,0 +1,70 @@
+{
+  "module_slug": "fundamentals",
+  "questions": [
+    {
+      "id": "q1",
+      "text": "What is the zero value of a string type in Go?",
+      "options": [
+        "nil",
+        "\"null\"",
+        "\"\" (empty string)",
+        "undefined"
+      ],
+      "correct": "\"\" (empty string)",
+      "explanation": "In Go, every type has a zero value. For strings, it's the empty string \"\". Unlike some languages, Go strings cannot be nil — only pointer types, slices, maps, channels, interfaces, and functions can be nil.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q2",
+      "text": "How does a type satisfy an interface in Go?",
+      "options": [
+        "By explicitly declaring 'implements InterfaceName'",
+        "By inheriting from the interface type",
+        "By implementing all the methods declared in the interface",
+        "By registering the type with the interface at runtime"
+      ],
+      "correct": "By implementing all the methods declared in the interface",
+      "explanation": "Go interfaces are satisfied implicitly. If a type has all the methods that an interface requires (with matching signatures), it automatically satisfies that interface. There's no 'implements' keyword — this is called structural typing.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q3",
+      "text": "What is the key difference between a value receiver and a pointer receiver on a method?",
+      "options": [
+        "Value receivers are faster because they avoid heap allocation",
+        "Pointer receivers allow the method to modify the original value, while value receivers work on a copy",
+        "Value receivers can only be used with basic types, not structs",
+        "There is no practical difference — it's just a style preference"
+      ],
+      "correct": "Pointer receivers allow the method to modify the original value, while value receivers work on a copy",
+      "explanation": "A value receiver gets a copy of the value, so any modifications are lost when the method returns. A pointer receiver gets a reference to the original value and can modify it. Pointer receivers are also preferred for large structs to avoid copying overhead.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q4",
+      "text": "In what order do deferred function calls execute?",
+      "options": [
+        "First-in, first-out (FIFO) — same order as declared",
+        "Last-in, first-out (LIFO) — reverse order of declaration",
+        "In parallel — all at the same time",
+        "Random order — no guaranteed ordering"
+      ],
+      "correct": "Last-in, first-out (LIFO) — reverse order of declaration",
+      "explanation": "Deferred calls are pushed onto a stack. When the enclosing function returns, they execute in LIFO order — the last defer registered runs first. This ensures proper cleanup ordering (e.g., unlock a mutex before closing a file that was opened first).",
+      "type": "single_choice"
+    },
+    {
+      "id": "q5",
+      "text": "What does the `...` operator do in `func sum(nums ...int) int`?",
+      "options": [
+        "It makes the function accept exactly three int arguments",
+        "It makes nums a pointer to an int array",
+        "It makes the function variadic — accepting zero or more int arguments as a slice",
+        "It spreads a single int into multiple values"
+      ],
+      "correct": "It makes the function variadic — accepting zero or more int arguments as a slice",
+      "explanation": "The ...int syntax makes 'nums' a variadic parameter. Inside the function, nums is a []int slice. The function can be called with any number of int arguments: sum(), sum(1), sum(1,2,3). You can also pass a slice with sum(slice...).",
+      "type": "single_choice"
+    }
+  ]
+}

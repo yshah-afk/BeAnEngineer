@@ -1,0 +1,70 @@
+{
+  "module_slug": "docker",
+  "questions": [
+    {
+      "id": "q1",
+      "text": "What is the primary benefit of ordering COPY and RUN instructions carefully in a Dockerfile?",
+      "options": [
+        "It makes the Dockerfile easier to read",
+        "It maximizes layer cache hits, so unchanged layers don't need to be rebuilt",
+        "It reduces the final image size",
+        "It ensures environment variables are set correctly"
+      ],
+      "correct": "It maximizes layer cache hits, so unchanged layers don't need to be rebuilt",
+      "explanation": "Docker caches each layer and reuses it if the instruction and all preceding layers are unchanged. By placing rarely-changing instructions (like dependency installation) before frequently-changing ones (like source code copy), you avoid re-running expensive steps on every build.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q2",
+      "text": "In a multi-stage Docker build, what happens to the intermediate build stages?",
+      "options": [
+        "They are included in the final image as compressed layers",
+        "They are discarded — only the final stage becomes the output image",
+        "They are saved as separate images in the local registry",
+        "They are cached but shipped alongside the final image"
+      ],
+      "correct": "They are discarded — only the final stage becomes the output image",
+      "explanation": "Intermediate stages are used only during the build process. Only the final FROM stage becomes the output image. You can selectively copy artifacts from earlier stages using 'COPY --from=stage_name', but everything else is discarded, dramatically reducing image size.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q3",
+      "text": "How do services in a Docker Compose network communicate with each other?",
+      "options": [
+        "Through the host machine's loopback interface (localhost)",
+        "Using the container's IP address which must be configured manually",
+        "By service name — Compose creates DNS entries for each service",
+        "Through a shared filesystem volume"
+      ],
+      "correct": "By service name — Compose creates DNS entries for each service",
+      "explanation": "Docker Compose automatically creates a network and registers each service's name as a DNS entry. A service named 'postgres' is reachable at hostname 'postgres' from any other service in the same Compose network, without needing to know IP addresses.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q4",
+      "text": "What is the purpose of the 'scratch' base image in Docker?",
+      "options": [
+        "It's a minimal Linux distribution with only a shell",
+        "It's an empty image with absolutely nothing — used for statically compiled binaries",
+        "It's a security-hardened version of Alpine Linux",
+        "It's a temporary image that's automatically cleaned up"
+      ],
+      "correct": "It's an empty image with absolutely nothing — used for statically compiled binaries",
+      "explanation": "The 'scratch' image is Docker's special empty image — 0 bytes. It's ideal for statically compiled languages like Go (with CGO_ENABLED=0) where the binary includes everything it needs to run. The resulting image contains only your binary and any files you explicitly COPY in.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q5",
+      "text": "What does 'depends_on' with 'condition: service_healthy' ensure in Docker Compose?",
+      "options": [
+        "The dependent service won't start until the dependency's health check passes",
+        "The dependent service will automatically restart if the dependency becomes unhealthy",
+        "The dependent service shares the same health check as the dependency",
+        "The dependency is rebuilt before the dependent service starts"
+      ],
+      "correct": "The dependent service won't start until the dependency's health check passes",
+      "explanation": "With 'condition: service_healthy', Compose waits for the dependency's health check to report a healthy status before starting the dependent service. Without this condition, depends_on only waits for the container to start — not for the service inside it to be ready (e.g., database accepting connections).",
+      "type": "single_choice"
+    }
+  ]
+}

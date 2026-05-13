@@ -1,0 +1,540 @@
+---
+title: "Ansible and Configuration Management"
+slug: "ansible-and-config"
+track: "devops"
+module: "infrastructure-as-code"
+difficulty: "Intermediate"
+estimatedMinutes: 45
+prerequisites: ["terraform-fundamentals"]
+---
+
+## Learning Objectives
+
+- Understand Ansible's agentless architecture and how it differs from Terraform
+- Write playbooks with tasks, handlers, and conditionals
+- Organize code with roles for reusable automation
+- Use Jinja2 templates for dynamic configuration files
+- Manage secrets with Ansible Vault
+- Understand AWX/Tower for enterprise automation
+
+## Prerequisites
+
+- Linux command-line basics (SSH, package management)
+- Understanding of YAML syntax
+- Infrastructure provisioning concepts (from Terraform lessons)
+
+## Terraform vs Ansible: Complementary Tools
+
+```mermaid
+graph TB
+    subgraph "Terraform — Provisioning"
+        T1[Create VPC]
+        T2[Launch EC2 Instances]
+        T3[Create RDS Database]
+        T4[Configure Load Balancer]
+    end
+
+    subgraph "Ansible — Configuration"
+        A1[Install packages]
+        A2[Configure services]
+        A3[Deploy application]
+        A4[Manage users/keys]
+    end
+
+    T2 -->|Inventory of IPs| A1
+```
+
+**Terraform** creates infrastructure. **Ansible** configures it. Use both together for a complete IaC pipeline.
+
+## Ansible Architecture
+
+Ansible is **agentless** — it connects to target machines over SSH (Linux) or WinRM (Windows) and executes tasks. No daemon to install.
+
+```mermaid
+graph LR
+    C[Control Node] -->|SSH| H1[Host 1]
+    C -->|SSH| H2[Host 2]
+    C -->|SSH| H3[Host 3]
+
+    subgraph "Control Node"
+        P[Playbook]
+        I[Inventory]
+        R[Roles]
+    end
+```
+
+```bash
+# Install Ansible
+pip install ansible
+
+# Verify installation
+ansible --version
+
+# Test connectivity to hosts
+ansible all -i inventory.ini -m ping
+```
+
+## Inventory
+
+The inventory defines which hosts Ansible manages.
+
+```ini
+# inventory.ini — INI format
+[webservers]
+web1.example.com ansible_user=ubuntu
+web2.example.com ansible_user=ubuntu
+web3.example.com ansible_user=ubuntu
+
+[databases]
+db1.example.com ansible_user=ubuntu ansible_port=2222
+db2.example.com ansible_user=ubuntu
+
+[monitoring]
+grafana.example.com
+
+[production:children]
+webservers
+databases
+
+[production:vars]
+ansible_ssh_private_key_file=~/.ssh/production.pem
+environment=production
+```
+
+```yaml
+# inventory.yaml — YAML format (preferred for complex setups)
+all:
+  children:
+    webservers:
+      hosts:
+        web1.example.com:
+          http_port: 8080
+        web2.example.com:
+          http_port: 8080
+      vars:
+        ansible_user: ubuntu
+        nginx_version: "1.27"
+
+    databases:
+      hosts:
+        db1.example.com:
+          postgres_port: 5432
+          replication_role: primary
+        db2.example.com:
+          postgres_port: 5432
+          replication_role: replica
+
+  vars:
+    ansible_ssh_private_key_file: ~/.ssh/production.pem
+```
+
+```bash
+# Dynamic inventory from AWS
+pip install boto3
+ansible-inventory -i aws_ec2.yaml --graph
+
+# aws_ec2.yaml
+# plugin: amazon.aws.aws_ec2
+# regions:
+#   - us-east-1
+# keyed_groups:
+#   - key: tags.Role
+#     prefix: role
+```
+
+## Playbooks
+
+Playbooks are YAML files that define automation tasks.
+
+```yaml
+# deploy-web.yaml
+---
+- name: Configure web servers
+  hosts: webservers
+  become: true
+  vars:
+    app_version: "2.1.0"
+    app_port: 8080
+
+  pre_tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - nginx
+          - python3
+          - python3-pip
+          - curl
+        state: present
+
+    - name: Create application user
+      user:
+        name: appuser
+        system: true
+        shell: /usr/sbin/nologin
+        home: /opt/app
+
+    - name: Deploy application
+      copy:
+        src: "files/app-{{ app_version }}.tar.gz"
+        dest: /opt/app/app.tar.gz
+      notify: Restart application
+
+    - name: Extract application
+      unarchive:
+        src: /opt/app/app.tar.gz
+        dest: /opt/app/
+        remote_src: true
+        owner: appuser
+        group: appuser
+
+    - name: Configure Nginx
+      template:
+        src: templates/nginx-site.conf.j2
+        dest: /etc/nginx/sites-available/app.conf
+        mode: "0644"
+      notify: Reload Nginx
+
+    - name: Enable Nginx site
+      file:
+        src: /etc/nginx/sites-available/app.conf
+        dest: /etc/nginx/sites-enabled/app.conf
+        state: link
+      notify: Reload Nginx
+
+    - name: Ensure application is running
+      systemd:
+        name: myapp
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Restart application
+      systemd:
+        name: myapp
+        state: restarted
+
+    - name: Reload Nginx
+      systemd:
+        name: nginx
+        state: reloaded
+
+  post_tasks:
+    - name: Verify application health
+      uri:
+        url: "http://localhost:{{ app_port }}/health"
+        status_code: 200
+      retries: 5
+      delay: 3
+```
+
+```bash
+# Run the playbook
+ansible-playbook -i inventory.yaml deploy-web.yaml
+
+# Dry run (check mode)
+ansible-playbook -i inventory.yaml deploy-web.yaml --check --diff
+
+# Limit to specific hosts
+ansible-playbook -i inventory.yaml deploy-web.yaml --limit web1.example.com
+
+# Run with extra variables
+ansible-playbook -i inventory.yaml deploy-web.yaml -e "app_version=2.2.0"
+```
+
+## Idempotency
+
+Every Ansible module is designed to be **idempotent** — running the same playbook twice produces the same result. This is Ansible's most important property.
+
+```yaml
+# Idempotent: Only creates if not exists
+- name: Ensure directory exists
+  file:
+    path: /opt/app/logs
+    state: directory
+    owner: appuser
+    mode: "0755"
+
+# NOT idempotent: Runs every time (avoid when possible)
+- name: Run migration script
+  command: python manage.py migrate
+  register: migration_result
+  changed_when: "'No migrations to apply' not in migration_result.stdout"
+```
+
+## Jinja2 Templates
+
+Templates generate configuration files dynamically using variables and logic.
+
+```jinja2
+{# templates/nginx-site.conf.j2 #}
+upstream app_backend {
+{% for host in groups['webservers'] %}
+    server {{ hostvars[host]['ansible_host'] }}:{{ app_port }} weight=1;
+{% endfor %}
+}
+
+server {
+    listen 80;
+    server_name {{ domain_name }};
+
+    location / {
+        proxy_pass http://app_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+{% if enable_rate_limiting | default(false) %}
+        limit_req zone=api burst=20 nodelay;
+{% endif %}
+    }
+
+    location /health {
+        return 200 '{"status":"healthy","version":"{{ app_version }}"}';
+        add_header Content-Type application/json;
+    }
+
+{% if enable_ssl | default(false) %}
+    listen 443 ssl;
+    ssl_certificate     /etc/ssl/certs/{{ domain_name }}.crt;
+    ssl_certificate_key /etc/ssl/private/{{ domain_name }}.key;
+{% endif %}
+}
+```
+
+## Roles
+
+Roles package tasks, templates, files, and variables into reusable units.
+
+```
+roles/
+└── webserver/
+    ├── defaults/
+    │   └── main.yaml       # Default variables (lowest priority)
+    ├── files/
+    │   └── app.tar.gz      # Static files
+    ├── handlers/
+    │   └── main.yaml       # Handler definitions
+    ├── meta/
+    │   └── main.yaml       # Role dependencies
+    ├── tasks/
+    │   └── main.yaml       # Task list
+    ├── templates/
+    │   └── nginx.conf.j2   # Jinja2 templates
+    └── vars/
+        └── main.yaml       # Role variables (higher priority)
+```
+
+```yaml
+# roles/webserver/tasks/main.yaml
+---
+- name: Install Nginx
+  apt:
+    name: "nginx={{ nginx_version }}*"
+    state: present
+  notify: Restart Nginx
+
+- name: Deploy Nginx configuration
+  template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    validate: nginx -t -c %s
+  notify: Reload Nginx
+
+- name: Ensure Nginx is running
+  systemd:
+    name: nginx
+    state: started
+    enabled: true
+
+# roles/webserver/handlers/main.yaml
+---
+- name: Restart Nginx
+  systemd:
+    name: nginx
+    state: restarted
+
+- name: Reload Nginx
+  systemd:
+    name: nginx
+    state: reloaded
+```
+
+```yaml
+# site.yaml — using roles
+---
+- name: Configure all servers
+  hosts: all
+  become: true
+  roles:
+    - common
+    - security-baseline
+
+- name: Configure web servers
+  hosts: webservers
+  become: true
+  roles:
+    - webserver
+    - role: monitoring-agent
+      vars:
+        metrics_port: 9100
+```
+
+## Ansible Vault
+
+Vault encrypts sensitive data — passwords, API keys, certificates.
+
+```bash
+# Create an encrypted file
+ansible-vault create secrets.yaml
+
+# Encrypt an existing file
+ansible-vault encrypt vars/production-secrets.yaml
+
+# Edit encrypted file
+ansible-vault edit secrets.yaml
+
+# View encrypted file
+ansible-vault view secrets.yaml
+
+# Run playbook with vault password
+ansible-playbook site.yaml --ask-vault-pass
+ansible-playbook site.yaml --vault-password-file ~/.vault_pass
+```
+
+```yaml
+# secrets.yaml (encrypted at rest)
+db_password: "s3cur3-p@ssw0rd!"
+api_key: "sk_live_xxxxxxxxxxxxx"
+ssl_private_key: |
+  -----BEGIN PRIVATE KEY-----
+  MIIEvQIBADANBgkqhkiG9w0BAQEFAA...
+  -----END PRIVATE KEY-----
+```
+
+```yaml
+# Reference vault variables in playbooks
+- name: Configure database connection
+  template:
+    src: db-config.j2
+    dest: /etc/app/database.yml
+  vars:
+    password: "{{ db_password }}"
+```
+
+## AWX / Ansible Tower
+
+AWX (open-source) and Ansible Tower (commercial) provide a web UI, RBAC, job scheduling, and audit logging for Ansible.
+
+```mermaid
+graph TB
+    subgraph "AWX Platform"
+        UI[Web Dashboard]
+        API[REST API]
+        SCHED[Job Scheduler]
+        INV[Dynamic Inventory]
+        CRED[Credential Store]
+    end
+
+    UI --> SCHED
+    API --> SCHED
+    SCHED --> J1[Playbook Job 1]
+    SCHED --> J2[Playbook Job 2]
+    INV --> J1
+    INV --> J2
+    CRED --> J1
+    CRED --> J2
+    J1 --> H1[Hosts]
+    J2 --> H2[Hosts]
+```
+
+## Hands-On Exercise: Configuration Automation
+
+### Exercise: Write a Complete Playbook
+
+```yaml
+# exercise.yaml — run against localhost
+---
+- name: Local development setup
+  hosts: localhost
+  connection: local
+  become: false
+
+  vars:
+    project_name: demo-app
+    project_dir: "/tmp/{{ project_name }}"
+    config:
+      database_url: "postgresql://localhost:5432/demo"
+      redis_url: "redis://localhost:6379"
+      log_level: "info"
+
+  tasks:
+    - name: Create project directory structure
+      file:
+        path: "{{ project_dir }}/{{ item }}"
+        state: directory
+      loop:
+        - config
+        - logs
+        - data
+
+    - name: Generate configuration file
+      copy:
+        dest: "{{ project_dir }}/config/app.env"
+        content: |
+          {% for key, value in config.items() %}
+          {{ key | upper }}={{ value }}
+          {% endfor %}
+          GENERATED_AT={{ ansible_date_time.iso8601 }}
+
+    - name: Create README
+      copy:
+        dest: "{{ project_dir }}/README.md"
+        content: |
+          # {{ project_name }}
+          Generated by Ansible on {{ ansible_date_time.date }}
+
+    - name: Verify setup
+      command: ls -la {{ project_dir }}
+      register: result
+      changed_when: false
+
+    - name: Show result
+      debug:
+        var: result.stdout_lines
+```
+
+```bash
+# Run the exercise
+ansible-playbook exercise.yaml
+
+# Run again — notice no changes (idempotent)
+ansible-playbook exercise.yaml
+
+# Clean up
+rm -rf /tmp/demo-app
+```
+
+## Key Takeaways
+
+- Ansible is **agentless** — connects over SSH, no software to install on targets
+- **Idempotency** is fundamental — every playbook run should be safe to repeat
+- **Roles** are the primary reuse mechanism — build a library of common roles
+- **Jinja2 templates** generate dynamic configs from variables and host facts
+- **Ansible Vault** encrypts secrets — never commit plaintext credentials
+- Use Ansible for **configuration** and Terraform for **provisioning** — they complement each other
+- **AWX** adds RBAC, scheduling, and audit trails for team environments
+
+## External Resources
+
+- [Ansible Documentation](https://docs.ansible.com/ansible/latest/)
+- [Ansible Galaxy — Community Roles](https://galaxy.ansible.com/)
+- [Ansible Best Practices](https://docs.ansible.com/ansible/latest/tips_tricks/ansible_tips_tricks.html)
+- [Jinja2 Template Designer](https://jinja.palletsprojects.com/en/3.1.x/templates/)
+- [AWX Project](https://github.com/ansible/awx)

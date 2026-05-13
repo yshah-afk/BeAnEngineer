@@ -1,0 +1,759 @@
+---
+title: "Design Patterns in Go"
+slug: "design-patterns"
+track: "golang"
+module: "interfaces-generics"
+difficulty: "Advanced"
+estimatedMinutes: 50
+prerequisites: ["interfaces-deep-dive", "generics-in-go"]
+---
+
+## Learning Objectives
+
+- Implement the Factory pattern for flexible object creation
+- Use the Strategy pattern for interchangeable algorithms
+- Build the Observer pattern for event-driven architectures
+- Apply the Builder pattern for complex object construction
+- Master the Functional Options pattern — Go's idiomatic configuration approach
+
+## Prerequisites
+
+- Deep understanding of Go interfaces and composition
+- Knowledge of generics and constraints
+- Experience with closures and higher-order functions
+
+## Core Concepts
+
+### Factory Pattern
+
+In Go, the Factory pattern typically uses constructor functions rather than class hierarchies. Factories hide creation complexity and enable dependency injection.
+
+```go
+package notification
+
+import (
+    "context"
+    "fmt"
+)
+
+type Notifier interface {
+    Send(ctx context.Context, recipient, message string) error
+}
+
+type EmailNotifier struct {
+    smtpHost string
+    smtpPort int
+    from     string
+}
+
+func (e *EmailNotifier) Send(ctx context.Context, recipient, message string) error {
+    // SMTP sending logic
+    fmt.Printf("Email to %s: %s\n", recipient, message)
+    return nil
+}
+
+type SlackNotifier struct {
+    webhookURL string
+    channel    string
+}
+
+func (s *SlackNotifier) Send(ctx context.Context, recipient, message string) error {
+    // Slack webhook logic
+    fmt.Printf("Slack #%s (@%s): %s\n", s.channel, recipient, message)
+    return nil
+}
+
+type SMSNotifier struct {
+    accountSID string
+    authToken  string
+    fromNumber string
+}
+
+func (s *SMSNotifier) Send(ctx context.Context, recipient, message string) error {
+    fmt.Printf("SMS to %s: %s\n", recipient, message)
+    return nil
+}
+
+// Factory function
+func NewNotifier(config NotifierConfig) (Notifier, error) {
+    switch config.Type {
+    case "email":
+        return &EmailNotifier{
+            smtpHost: config.Host,
+            smtpPort: config.Port,
+            from:     config.From,
+        }, nil
+    case "slack":
+        return &SlackNotifier{
+            webhookURL: config.WebhookURL,
+            channel:    config.Channel,
+        }, nil
+    case "sms":
+        return &SMSNotifier{
+            accountSID: config.AccountSID,
+            authToken:  config.AuthToken,
+            fromNumber: config.From,
+        }, nil
+    default:
+        return nil, fmt.Errorf("unknown notifier type: %s", config.Type)
+    }
+}
+
+// Registry-based factory (extensible without modifying factory code)
+type NotifierFactory func(config NotifierConfig) (Notifier, error)
+
+var registry = map[string]NotifierFactory{}
+
+func Register(name string, factory NotifierFactory) {
+    registry[name] = factory
+}
+
+func Create(config NotifierConfig) (Notifier, error) {
+    factory, ok := registry[config.Type]
+    if !ok {
+        return nil, fmt.Errorf("no factory registered for type: %s", config.Type)
+    }
+    return factory(config)
+}
+
+func init() {
+    Register("email", func(c NotifierConfig) (Notifier, error) {
+        return &EmailNotifier{smtpHost: c.Host, smtpPort: c.Port, from: c.From}, nil
+    })
+    Register("slack", func(c NotifierConfig) (Notifier, error) {
+        return &SlackNotifier{webhookURL: c.WebhookURL, channel: c.Channel}, nil
+    })
+}
+```
+
+### Strategy Pattern
+
+The Strategy pattern defines a family of algorithms, encapsulates each one, and makes them interchangeable. In Go, this maps naturally to interfaces or function types.
+
+```go
+package pricing
+
+import (
+    "math"
+    "time"
+)
+
+type Order struct {
+    Items      []OrderItem
+    CustomerID string
+    CreatedAt  time.Time
+}
+
+type OrderItem struct {
+    ProductID string
+    Quantity  int
+    Price     float64
+}
+
+func (o *Order) Subtotal() float64 {
+    var total float64
+    for _, item := range o.Items {
+        total += item.Price * float64(item.Quantity)
+    }
+    return total
+}
+
+// Strategy interface
+type DiscountStrategy interface {
+    Calculate(order *Order) float64
+}
+
+// Concrete strategies
+type NoDiscount struct{}
+
+func (d NoDiscount) Calculate(order *Order) float64 { return 0 }
+
+type PercentageDiscount struct {
+    Percent float64
+}
+
+func (d PercentageDiscount) Calculate(order *Order) float64 {
+    return order.Subtotal() * (d.Percent / 100)
+}
+
+type TieredDiscount struct {
+    Tiers []Tier
+}
+
+type Tier struct {
+    MinAmount float64
+    Percent   float64
+}
+
+func (d TieredDiscount) Calculate(order *Order) float64 {
+    subtotal := order.Subtotal()
+    var percent float64
+    for _, tier := range d.Tiers {
+        if subtotal >= tier.MinAmount {
+            percent = tier.Percent
+        }
+    }
+    return subtotal * (percent / 100)
+}
+
+type BuyNGetFree struct {
+    BuyCount  int
+    FreeCount int
+}
+
+func (d BuyNGetFree) Calculate(order *Order) float64 {
+    var discount float64
+    for _, item := range order.Items {
+        groups := item.Quantity / (d.BuyCount + d.FreeCount)
+        freeItems := groups * d.FreeCount
+        discount += item.Price * float64(freeItems)
+    }
+    return discount
+}
+
+// Strategy as function type (simpler for one-off strategies)
+type DiscountFunc func(order *Order) float64
+
+func (f DiscountFunc) Calculate(order *Order) float64 { return f(order) }
+
+// Price calculator using strategy
+type PriceCalculator struct {
+    strategy DiscountStrategy
+}
+
+func NewPriceCalculator(strategy DiscountStrategy) *PriceCalculator {
+    return &PriceCalculator{strategy: strategy}
+}
+
+func (pc *PriceCalculator) FinalPrice(order *Order) float64 {
+    subtotal := order.Subtotal()
+    discount := pc.strategy.Calculate(order)
+    return math.Max(0, subtotal-discount)
+}
+```
+
+### Observer Pattern
+
+The Observer pattern defines a one-to-many dependency between objects so that when one object changes state, all its dependents are notified.
+
+```go
+package events
+
+import (
+    "context"
+    "log/slog"
+    "sync"
+)
+
+type Event struct {
+    Type    string
+    Payload any
+    Source  string
+}
+
+type Handler func(ctx context.Context, event Event) error
+
+type EventBus struct {
+    mu       sync.RWMutex
+    handlers map[string][]subscriberEntry
+    logger   *slog.Logger
+}
+
+type subscriberEntry struct {
+    id      string
+    handler Handler
+}
+
+func NewEventBus(logger *slog.Logger) *EventBus {
+    return &EventBus{
+        handlers: make(map[string][]subscriberEntry),
+        logger:   logger,
+    }
+}
+
+func (eb *EventBus) Subscribe(eventType, subscriberID string, handler Handler) {
+    eb.mu.Lock()
+    defer eb.mu.Unlock()
+    eb.handlers[eventType] = append(eb.handlers[eventType], subscriberEntry{
+        id:      subscriberID,
+        handler: handler,
+    })
+}
+
+func (eb *EventBus) Unsubscribe(eventType, subscriberID string) {
+    eb.mu.Lock()
+    defer eb.mu.Unlock()
+    entries := eb.handlers[eventType]
+    for i, entry := range entries {
+        if entry.id == subscriberID {
+            eb.handlers[eventType] = append(entries[:i], entries[i+1:]...)
+            return
+        }
+    }
+}
+
+func (eb *EventBus) Publish(ctx context.Context, event Event) {
+    eb.mu.RLock()
+    entries := make([]subscriberEntry, len(eb.handlers[event.Type]))
+    copy(entries, eb.handlers[event.Type])
+    eb.mu.RUnlock()
+
+    for _, entry := range entries {
+        if err := entry.handler(ctx, event); err != nil {
+            eb.logger.Error("handler failed",
+                "event_type", event.Type,
+                "subscriber", entry.id,
+                "error", err,
+            )
+        }
+    }
+}
+
+// Async variant for non-blocking publishing
+func (eb *EventBus) PublishAsync(ctx context.Context, event Event) {
+    eb.mu.RLock()
+    entries := make([]subscriberEntry, len(eb.handlers[event.Type]))
+    copy(entries, eb.handlers[event.Type])
+    eb.mu.RUnlock()
+
+    for _, entry := range entries {
+        go func(e subscriberEntry) {
+            if err := e.handler(ctx, event); err != nil {
+                eb.logger.Error("async handler failed",
+                    "event_type", event.Type,
+                    "subscriber", e.id,
+                    "error", err,
+                )
+            }
+        }(entry)
+    }
+}
+```
+
+### Builder Pattern
+
+The Builder pattern constructs complex objects step-by-step. In Go, it's common for configuring structs with many optional fields.
+
+```go
+package query
+
+import (
+    "fmt"
+    "strings"
+)
+
+type QueryBuilder struct {
+    table      string
+    columns    []string
+    conditions []string
+    args       []any
+    orderBy    []string
+    limit      int
+    offset     int
+    joins      []string
+}
+
+func Select(columns ...string) *QueryBuilder {
+    return &QueryBuilder{columns: columns}
+}
+
+func (qb *QueryBuilder) From(table string) *QueryBuilder {
+    qb.table = table
+    return qb
+}
+
+func (qb *QueryBuilder) Where(condition string, args ...any) *QueryBuilder {
+    qb.conditions = append(qb.conditions, condition)
+    qb.args = append(qb.args, args...)
+    return qb
+}
+
+func (qb *QueryBuilder) Join(join string) *QueryBuilder {
+    qb.joins = append(qb.joins, join)
+    return qb
+}
+
+func (qb *QueryBuilder) OrderBy(columns ...string) *QueryBuilder {
+    qb.orderBy = append(qb.orderBy, columns...)
+    return qb
+}
+
+func (qb *QueryBuilder) Limit(n int) *QueryBuilder {
+    qb.limit = n
+    return qb
+}
+
+func (qb *QueryBuilder) Offset(n int) *QueryBuilder {
+    qb.offset = n
+    return qb
+}
+
+func (qb *QueryBuilder) Build() (string, []any) {
+    var sb strings.Builder
+    sb.WriteString("SELECT ")
+    if len(qb.columns) == 0 {
+        sb.WriteString("*")
+    } else {
+        sb.WriteString(strings.Join(qb.columns, ", "))
+    }
+
+    sb.WriteString(" FROM ")
+    sb.WriteString(qb.table)
+
+    for _, join := range qb.joins {
+        sb.WriteString(" ")
+        sb.WriteString(join)
+    }
+
+    if len(qb.conditions) > 0 {
+        sb.WriteString(" WHERE ")
+        sb.WriteString(strings.Join(qb.conditions, " AND "))
+    }
+
+    if len(qb.orderBy) > 0 {
+        sb.WriteString(" ORDER BY ")
+        sb.WriteString(strings.Join(qb.orderBy, ", "))
+    }
+
+    if qb.limit > 0 {
+        sb.WriteString(fmt.Sprintf(" LIMIT %d", qb.limit))
+    }
+
+    if qb.offset > 0 {
+        sb.WriteString(fmt.Sprintf(" OFFSET %d", qb.offset))
+    }
+
+    return sb.String(), qb.args
+}
+
+// Usage:
+// query, args := Select("id", "name", "email").
+//     From("users").
+//     Join("LEFT JOIN orders ON orders.user_id = users.id").
+//     Where("active = ?", true).
+//     Where("created_at > ?", lastWeek).
+//     OrderBy("created_at DESC").
+//     Limit(20).
+//     Offset(40).
+//     Build()
+```
+
+### Functional Options Pattern
+
+The Functional Options pattern is Go's idiomatic approach to configuring complex objects with sensible defaults and optional overrides.
+
+```go
+package server
+
+import (
+    "crypto/tls"
+    "log/slog"
+    "net/http"
+    "time"
+)
+
+type Server struct {
+    addr         string
+    readTimeout  time.Duration
+    writeTimeout time.Duration
+    idleTimeout  time.Duration
+    maxBodySize  int64
+    tlsConfig    *tls.Config
+    logger       *slog.Logger
+    middleware   []func(http.Handler) http.Handler
+    handler      http.Handler
+}
+
+type Option func(*Server)
+
+func WithAddr(addr string) Option {
+    return func(s *Server) { s.addr = addr }
+}
+
+func WithReadTimeout(d time.Duration) Option {
+    return func(s *Server) { s.readTimeout = d }
+}
+
+func WithWriteTimeout(d time.Duration) Option {
+    return func(s *Server) { s.writeTimeout = d }
+}
+
+func WithIdleTimeout(d time.Duration) Option {
+    return func(s *Server) { s.idleTimeout = d }
+}
+
+func WithMaxBodySize(size int64) Option {
+    return func(s *Server) { s.maxBodySize = size }
+}
+
+func WithTLS(certFile, keyFile string) Option {
+    return func(s *Server) {
+        cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+        if err != nil {
+            panic(fmt.Sprintf("failed to load TLS cert: %v", err))
+        }
+        s.tlsConfig = &tls.Config{
+            Certificates: []tls.Certificate{cert},
+            MinVersion:   tls.VersionTLS13,
+        }
+    }
+}
+
+func WithLogger(logger *slog.Logger) Option {
+    return func(s *Server) { s.logger = logger }
+}
+
+func WithMiddleware(mw ...func(http.Handler) http.Handler) Option {
+    return func(s *Server) { s.middleware = append(s.middleware, mw...) }
+}
+
+func NewServer(handler http.Handler, opts ...Option) *Server {
+    s := &Server{
+        addr:         ":8080",
+        readTimeout:  15 * time.Second,
+        writeTimeout: 15 * time.Second,
+        idleTimeout:  60 * time.Second,
+        maxBodySize:  10 << 20, // 10MB
+        logger:       slog.Default(),
+        handler:      handler,
+    }
+
+    for _, opt := range opts {
+        opt(s)
+    }
+
+    return s
+}
+
+func (s *Server) Start() error {
+    handler := s.handler
+    for i := len(s.middleware) - 1; i >= 0; i-- {
+        handler = s.middleware[i](handler)
+    }
+
+    srv := &http.Server{
+        Addr:         s.addr,
+        Handler:      handler,
+        ReadTimeout:  s.readTimeout,
+        WriteTimeout: s.writeTimeout,
+        IdleTimeout:  s.idleTimeout,
+        TLSConfig:    s.tlsConfig,
+    }
+
+    s.logger.Info("server starting", "addr", s.addr)
+
+    if s.tlsConfig != nil {
+        return srv.ListenAndServeTLS("", "")
+    }
+    return srv.ListenAndServe()
+}
+
+// Usage:
+// srv := NewServer(mux,
+//     WithAddr(":9090"),
+//     WithReadTimeout(30*time.Second),
+//     WithLogger(slog.New(slog.NewJSONHandler(os.Stdout, nil))),
+//     WithMiddleware(loggingMiddleware, recoveryMiddleware),
+// )
+// srv.Start()
+```
+
+**Why functional options beat alternatives:**
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| Config struct | Simple, familiar | Can't distinguish zero value from "not set" |
+| Builder pattern | Fluent API | Verbose, doesn't return errors easily |
+| Functional options | Self-documenting, extensible, validates | Slightly more boilerplate per option |
+
+```mermaid
+graph LR
+    Constructor["NewServer(handler, opts...)"] --> Defaults["Apply Defaults"]
+    Defaults --> Opt1["Apply Option 1"]
+    Opt1 --> Opt2["Apply Option 2"]
+    Opt2 --> OptN["Apply Option N"]
+    OptN --> Server["Configured Server"]
+```
+
+## Best Practices
+
+1. **Use functional options for public APIs** — they're backward-compatible and self-documenting
+2. **Prefer composition over inheritance** — embed interfaces and structs instead of deep hierarchies
+3. **Keep patterns simple** — Go's simplicity is a feature; don't import complex GoF patterns wholesale
+4. **Document the pattern** — a short comment explaining the design choice helps future maintainers
+5. **Use interface-based strategies for testability** — easy to mock in unit tests
+
+## Common Pitfalls
+
+```go
+// PITFALL: Builder without validation
+query, _ := Select().From("").Build() // produces invalid SQL
+
+// FIX: Validate in Build()
+func (qb *QueryBuilder) Build() (string, []any, error) {
+    if qb.table == "" {
+        return "", nil, fmt.Errorf("table name required")
+    }
+    // ...
+}
+
+// PITFALL: Observer with retained references causing memory leaks
+bus.Subscribe("event", "handler-1", func(ctx context.Context, e Event) error {
+    // captures large struct — won't be GC'd until unsubscribed
+    return processLargeStruct(largeData)
+})
+// FIX: always Unsubscribe when the subscriber's lifecycle ends
+
+// PITFALL: Functional options that can't report errors
+func WithDatabaseURL(url string) Option {
+    return func(s *Server) {
+        db, err := sql.Open("postgres", url) // error is swallowed!
+        if err != nil {
+            panic(err) // bad
+        }
+        s.db = db
+    }
+}
+
+// FIX: Use error-returning options
+type OptionErr func(*Server) error
+
+func NewServer(handler http.Handler, opts ...OptionErr) (*Server, error) {
+    s := &Server{/* defaults */}
+    for _, opt := range opts {
+        if err := opt(s); err != nil {
+            return nil, err
+        }
+    }
+    return s, nil
+}
+```
+
+## Hands-On Exercises
+
+### Exercise 1: Middleware Chain Builder
+
+Build a middleware chain using the functional options pattern that supports: logging, authentication, rate limiting, CORS, and recovery. Each middleware should be composable and configurable.
+
+<details>
+<summary>Solution</summary>
+
+```go
+package main
+
+import (
+    "fmt"
+    "log/slog"
+    "net/http"
+    "time"
+)
+
+type MiddlewareChain struct {
+    middlewares []func(http.Handler) http.Handler
+}
+
+type MiddlewareOption func(*MiddlewareChain)
+
+func WithLogging(logger *slog.Logger) MiddlewareOption {
+    return func(mc *MiddlewareChain) {
+        mc.middlewares = append(mc.middlewares, func(next http.Handler) http.Handler {
+            return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                start := time.Now()
+                next.ServeHTTP(w, r)
+                logger.Info("request",
+                    "method", r.Method,
+                    "path", r.URL.Path,
+                    "duration", time.Since(start),
+                )
+            })
+        })
+    }
+}
+
+func WithRecovery() MiddlewareOption {
+    return func(mc *MiddlewareChain) {
+        mc.middlewares = append(mc.middlewares, func(next http.Handler) http.Handler {
+            return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                defer func() {
+                    if err := recover(); err != nil {
+                        http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+                        slog.Error("panic recovered", "error", err)
+                    }
+                }()
+                next.ServeHTTP(w, r)
+            })
+        })
+    }
+}
+
+func WithCORS(allowedOrigins []string) MiddlewareOption {
+    return func(mc *MiddlewareChain) {
+        mc.middlewares = append(mc.middlewares, func(next http.Handler) http.Handler {
+            return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                origin := r.Header.Get("Origin")
+                for _, allowed := range allowedOrigins {
+                    if origin == allowed || allowed == "*" {
+                        w.Header().Set("Access-Control-Allow-Origin", origin)
+                        break
+                    }
+                }
+                if r.Method == "OPTIONS" {
+                    w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE")
+                    w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+                    w.WriteHeader(http.StatusOK)
+                    return
+                }
+                next.ServeHTTP(w, r)
+            })
+        })
+    }
+}
+
+func NewMiddlewareChain(opts ...MiddlewareOption) *MiddlewareChain {
+    mc := &MiddlewareChain{}
+    for _, opt := range opts {
+        opt(mc)
+    }
+    return mc
+}
+
+func (mc *MiddlewareChain) Then(handler http.Handler) http.Handler {
+    for i := len(mc.middlewares) - 1; i >= 0; i-- {
+        handler = mc.middlewares[i](handler)
+    }
+    return handler
+}
+
+func main() {
+    chain := NewMiddlewareChain(
+        WithRecovery(),
+        WithLogging(slog.Default()),
+        WithCORS([]string{"https://example.com"}),
+    )
+
+    handler := chain.Then(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        fmt.Fprintln(w, "Hello!")
+    }))
+
+    http.ListenAndServe(":8080", handler)
+}
+```
+
+</details>
+
+## Key Takeaways
+
+- Go favors composition over inheritance — patterns adapt accordingly
+- Factory functions replace class hierarchies; registry pattern adds extensibility
+- Strategy pattern maps cleanly to interfaces or function types
+- The Observer pattern powers event-driven architectures with pub/sub semantics
+- Functional Options is Go's idiomatic configuration pattern — backward-compatible and self-documenting
+- Builder pattern works well for constructing complex queries or messages step-by-step
+
+## External Resources
+
+- [Dave Cheney: Functional Options for Friendly APIs](https://dave.cheney.net/2014/10/17/functional-options-for-friendly-apis)
+- [Rob Pike: Self-Referential Functions](https://commandcenter.blogspot.com/2014/01/self-referential-functions-and-design.html)
+- [Go Wiki: Go Design Patterns](https://github.com/tmrts/go-patterns)
+- [Peter Bourgon: Go for Industrial Programming](https://peter.bourgon.org/go-for-industrial-programming/)
+- [Effective Go: Embedding](https://go.dev/doc/effective_go#embedding)

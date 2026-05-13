@@ -1,0 +1,638 @@
+---
+title: "REST APIs with Gin"
+slug: "rest-api-with-gin"
+track: "golang"
+module: "web-development"
+difficulty: "Intermediate"
+estimatedMinutes: 45
+prerequisites: ["http-server-basics"]
+---
+
+## Learning Objectives
+
+- Set up a Gin-based REST API with best practices
+- Implement route groups, parameterized routes, and query binding
+- Build custom middleware for auth, logging, and rate limiting
+- Use Gin's binding and validation for request parsing
+- Structure error handling with consistent API responses
+- Organize a real-world Gin project with clean architecture
+
+## Prerequisites
+
+- Understanding of Go's `net/http` package and handler pattern
+- Knowledge of HTTP methods, status codes, and REST conventions
+- Familiarity with JSON serialization in Go
+
+## Core Concepts
+
+### Why Gin?
+
+Gin is Go's most popular web framework. It provides a fast HTTP router (based on httprouter's radix tree), middleware chaining, JSON validation, and rendering — with minimal overhead.
+
+```go
+package main
+
+import (
+    "net/http"
+
+    "github.com/gin-gonic/gin"
+)
+
+func main() {
+    r := gin.Default() // includes Logger and Recovery middleware
+
+    r.GET("/ping", func(c *gin.Context) {
+        c.JSON(http.StatusOK, gin.H{"message": "pong"})
+    })
+
+    r.Run(":8080")
+}
+```
+
+### Route Groups and Versioning
+
+```go
+func SetupRouter(
+    userHandler *UserHandler,
+    orderHandler *OrderHandler,
+    authMiddleware gin.HandlerFunc,
+) *gin.Engine {
+    r := gin.New()
+    r.Use(gin.Logger(), gin.Recovery())
+
+    // Public routes
+    public := r.Group("/api/v1")
+    {
+        public.POST("/auth/login", userHandler.Login)
+        public.POST("/auth/register", userHandler.Register)
+        public.GET("/health", healthCheck)
+    }
+
+    // Protected routes
+    protected := r.Group("/api/v1")
+    protected.Use(authMiddleware)
+    {
+        // Users
+        protected.GET("/users/me", userHandler.GetProfile)
+        protected.PUT("/users/me", userHandler.UpdateProfile)
+
+        // Orders
+        protected.GET("/orders", orderHandler.List)
+        protected.POST("/orders", orderHandler.Create)
+        protected.GET("/orders/:id", orderHandler.GetByID)
+        protected.PUT("/orders/:id/cancel", orderHandler.Cancel)
+    }
+
+    // Admin routes
+    admin := r.Group("/api/v1/admin")
+    admin.Use(authMiddleware, adminOnly())
+    {
+        admin.GET("/users", userHandler.ListAll)
+        admin.DELETE("/users/:id", userHandler.Delete)
+    }
+
+    return r
+}
+```
+
+### Request Binding and Validation
+
+Gin uses struct tags for automatic request parsing and validation via the `binding` tag (powered by go-playground/validator).
+
+```go
+type CreateOrderRequest struct {
+    CustomerID string         `json:"customer_id" binding:"required,uuid"`
+    Items      []OrderItem    `json:"items" binding:"required,min=1,dive"`
+    ShipTo     Address        `json:"ship_to" binding:"required"`
+    Notes      string         `json:"notes" binding:"max=500"`
+    Priority   string         `json:"priority" binding:"oneof=standard express overnight"`
+}
+
+type OrderItem struct {
+    ProductID string  `json:"product_id" binding:"required"`
+    Quantity  int     `json:"quantity" binding:"required,min=1,max=100"`
+    Price     float64 `json:"price" binding:"required,gt=0"`
+}
+
+type Address struct {
+    Street  string `json:"street" binding:"required"`
+    City    string `json:"city" binding:"required"`
+    State   string `json:"state" binding:"required,len=2"`
+    ZipCode string `json:"zip_code" binding:"required,numeric,len=5"`
+    Country string `json:"country" binding:"required,iso3166_1_alpha2"`
+}
+
+// Query parameters binding
+type ListOrdersQuery struct {
+    Page     int    `form:"page" binding:"min=1"`
+    PerPage  int    `form:"per_page" binding:"min=1,max=100"`
+    Status   string `form:"status" binding:"omitempty,oneof=pending confirmed shipped delivered"`
+    SortBy   string `form:"sort_by" binding:"omitempty,oneof=created_at total_amount"`
+    SortDir  string `form:"sort_dir" binding:"omitempty,oneof=asc desc"`
+}
+
+func (h *OrderHandler) Create(c *gin.Context) {
+    var req CreateOrderRequest
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{
+            "error":   "validation_failed",
+            "details": formatValidationErrors(err),
+        })
+        return
+    }
+
+    order, err := h.service.CreateOrder(c.Request.Context(), req)
+    if err != nil {
+        handleServiceError(c, err)
+        return
+    }
+
+    c.JSON(http.StatusCreated, gin.H{"data": order})
+}
+
+func (h *OrderHandler) List(c *gin.Context) {
+    query := ListOrdersQuery{Page: 1, PerPage: 20, SortDir: "desc"}
+    if err := c.ShouldBindQuery(&query); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_query_params"})
+        return
+    }
+
+    orders, total, err := h.service.ListOrders(c.Request.Context(), query)
+    if err != nil {
+        handleServiceError(c, err)
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "data": orders,
+        "meta": gin.H{
+            "page":     query.Page,
+            "per_page": query.PerPage,
+            "total":    total,
+        },
+    })
+}
+```
+
+### Custom Middleware
+
+```go
+package middleware
+
+import (
+    "net/http"
+    "strings"
+    "time"
+
+    "github.com/gin-gonic/gin"
+    "golang.org/x/time/rate"
+)
+
+func AuthMiddleware(tokenService TokenService) gin.HandlerFunc {
+    return func(c *gin.Context) {
+        header := c.GetHeader("Authorization")
+        if header == "" {
+            c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+                "error": "missing_authorization_header",
+            })
+            return
+        }
+
+        parts := strings.SplitN(header, " ", 2)
+        if len(parts) != 2 || parts[0] != "Bearer" {
+            c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+                "error": "invalid_authorization_format",
+            })
+            return
+        }
+
+        claims, err := tokenService.Validate(parts[1])
+        if err != nil {
+            c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+                "error": "invalid_token",
+            })
+            return
+        }
+
+        c.Set("user_id", claims.UserID)
+        c.Set("user_role", claims.Role)
+        c.Next()
+    }
+}
+
+func RateLimiter(rps int, burst int) gin.HandlerFunc {
+    limiter := rate.NewLimiter(rate.Limit(rps), burst)
+
+    return func(c *gin.Context) {
+        if !limiter.Allow() {
+            c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+                "error":       "rate_limit_exceeded",
+                "retry_after": "1s",
+            })
+            return
+        }
+        c.Next()
+    }
+}
+
+func RequestTimer() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        start := time.Now()
+        c.Next()
+        duration := time.Since(start)
+
+        c.Header("X-Response-Time", duration.String())
+
+        // Log slow requests
+        if duration > 500*time.Millisecond {
+            slog.Warn("slow request",
+                "method", c.Request.Method,
+                "path", c.Request.URL.Path,
+                "duration_ms", duration.Milliseconds(),
+                "status", c.Writer.Status(),
+            )
+        }
+    }
+}
+
+func CORS(allowedOrigins []string) gin.HandlerFunc {
+    return func(c *gin.Context) {
+        origin := c.GetHeader("Origin")
+        allowed := false
+        for _, o := range allowedOrigins {
+            if o == "*" || o == origin {
+                allowed = true
+                break
+            }
+        }
+
+        if allowed {
+            c.Header("Access-Control-Allow-Origin", origin)
+            c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+            c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
+            c.Header("Access-Control-Max-Age", "86400")
+        }
+
+        if c.Request.Method == "OPTIONS" {
+            c.AbortWithStatus(http.StatusNoContent)
+            return
+        }
+
+        c.Next()
+    }
+}
+```
+
+### Structured Error Handling
+
+```go
+package apierror
+
+import (
+    "errors"
+    "net/http"
+
+    "github.com/gin-gonic/gin"
+    "github.com/go-playground/validator/v10"
+)
+
+type AppError struct {
+    Code    int    `json:"-"`
+    Type    string `json:"type"`
+    Message string `json:"message"`
+    Details any    `json:"details,omitempty"`
+}
+
+func (e *AppError) Error() string { return e.Message }
+
+var (
+    ErrNotFound     = &AppError{Code: 404, Type: "not_found", Message: "resource not found"}
+    ErrUnauthorized = &AppError{Code: 401, Type: "unauthorized", Message: "authentication required"}
+    ErrForbidden    = &AppError{Code: 403, Type: "forbidden", Message: "insufficient permissions"}
+)
+
+func NotFound(resource, id string) *AppError {
+    return &AppError{
+        Code:    http.StatusNotFound,
+        Type:    "not_found",
+        Message: resource + " not found",
+        Details: gin.H{"id": id},
+    }
+}
+
+func ValidationFailed(err error) *AppError {
+    var ve validator.ValidationErrors
+    if errors.As(err, &ve) {
+        fields := make([]gin.H, 0, len(ve))
+        for _, fe := range ve {
+            fields = append(fields, gin.H{
+                "field":   fe.Field(),
+                "tag":     fe.Tag(),
+                "value":   fe.Value(),
+                "message": formatFieldError(fe),
+            })
+        }
+        return &AppError{
+            Code:    http.StatusUnprocessableEntity,
+            Type:    "validation_failed",
+            Message: "request validation failed",
+            Details: fields,
+        }
+    }
+    return &AppError{
+        Code:    http.StatusBadRequest,
+        Type:    "bad_request",
+        Message: err.Error(),
+    }
+}
+
+func HandleError(c *gin.Context, err error) {
+    var appErr *AppError
+    if errors.As(err, &appErr) {
+        c.JSON(appErr.Code, gin.H{"error": appErr})
+        return
+    }
+    c.JSON(http.StatusInternalServerError, gin.H{
+        "error": gin.H{
+            "type":    "internal_error",
+            "message": "an unexpected error occurred",
+        },
+    })
+}
+
+func formatFieldError(fe validator.FieldError) string {
+    switch fe.Tag() {
+    case "required":
+        return fe.Field() + " is required"
+    case "min":
+        return fe.Field() + " must be at least " + fe.Param()
+    case "max":
+        return fe.Field() + " must be at most " + fe.Param()
+    case "email":
+        return fe.Field() + " must be a valid email"
+    default:
+        return fe.Field() + " failed " + fe.Tag() + " validation"
+    }
+}
+```
+
+### Project Structure
+
+```
+myapi/
+├── cmd/
+│   └── server/
+│       └── main.go           # entry point, wire dependencies
+├── internal/
+│   ├── handler/              # HTTP handlers (Gin controllers)
+│   │   ├── user.go
+│   │   ├── order.go
+│   │   └── health.go
+│   ├── middleware/           # Gin middleware
+│   │   ├── auth.go
+│   │   ├── ratelimit.go
+│   │   └── cors.go
+│   ├── service/              # Business logic
+│   │   ├── user.go
+│   │   └── order.go
+│   ├── repository/           # Data access
+│   │   ├── user.go
+│   │   └── order.go
+│   ├── model/                # Domain models
+│   │   ├── user.go
+│   │   └── order.go
+│   └── config/               # Configuration
+│       └── config.go
+├── pkg/                      # Public packages
+│   └── apierror/
+│       └── errors.go
+├── go.mod
+├── go.sum
+└── Makefile
+```
+
+## Best Practices
+
+1. **Use `ShouldBind*` over `Bind*`** — `ShouldBind` returns errors without automatically writing a 400 response, giving you control
+2. **Group routes by resource and auth level** — separate public, authenticated, and admin routes
+3. **Extract handlers into structs with dependencies** — enables clean dependency injection
+4. **Use context values sparingly** — only for request-scoped data like user ID, trace ID
+5. **Set Gin to release mode in production** — `gin.SetMode(gin.ReleaseMode)` disables debug logging
+
+## Common Pitfalls
+
+```go
+// PITFALL: Using c.JSON after c.Abort
+func badMiddleware(c *gin.Context) {
+    c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized"})
+    c.JSON(200, gin.H{"data": "this still executes!"}) // won't send but is confusing
+}
+// FIX: return after AbortWithStatusJSON
+
+// PITFALL: Not checking c.ShouldBindJSON error
+func badHandler(c *gin.Context) {
+    var req MyRequest
+    c.ShouldBindJSON(&req) // error ignored!
+    // req may be zero-valued
+}
+
+// PITFALL: Modifying gin.H after passing to c.JSON
+func raceHandler(c *gin.Context) {
+    response := gin.H{"status": "ok"}
+    c.JSON(200, response)
+    response["extra"] = "data" // race condition! JSON encoding is async
+}
+```
+
+## Hands-On Exercises
+
+### Exercise 1: Complete CRUD API with Validation
+
+Build a task management API with Gin that includes:
+- CRUD operations for tasks (title, description, status, due_date, priority)
+- Input validation with custom error messages
+- Pagination and filtering on the list endpoint
+- Authentication middleware (JWT-based)
+
+<details>
+<summary>Solution</summary>
+
+```go
+package main
+
+import (
+    "net/http"
+    "strconv"
+    "sync"
+    "time"
+
+    "github.com/gin-gonic/gin"
+)
+
+type Task struct {
+    ID          int        `json:"id"`
+    Title       string     `json:"title"`
+    Description string     `json:"description"`
+    Status      string     `json:"status"`
+    Priority    string     `json:"priority"`
+    DueDate     *time.Time `json:"due_date,omitempty"`
+    CreatedAt   time.Time  `json:"created_at"`
+    UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+type CreateTaskReq struct {
+    Title       string `json:"title" binding:"required,min=3,max=200"`
+    Description string `json:"description" binding:"max=2000"`
+    Status      string `json:"status" binding:"required,oneof=todo in_progress done"`
+    Priority    string `json:"priority" binding:"required,oneof=low medium high critical"`
+    DueDate     string `json:"due_date" binding:"omitempty,datetime=2006-01-02"`
+}
+
+type UpdateTaskReq struct {
+    Title       *string `json:"title" binding:"omitempty,min=3,max=200"`
+    Description *string `json:"description" binding:"omitempty,max=2000"`
+    Status      *string `json:"status" binding:"omitempty,oneof=todo in_progress done"`
+    Priority    *string `json:"priority" binding:"omitempty,oneof=low medium high critical"`
+}
+
+type TaskStore struct {
+    mu     sync.RWMutex
+    tasks  map[int]Task
+    nextID int
+}
+
+func NewTaskStore() *TaskStore {
+    return &TaskStore{tasks: make(map[int]Task)}
+}
+
+func main() {
+    store := NewTaskStore()
+
+    r := gin.Default()
+    api := r.Group("/api/v1")
+
+    api.POST("/tasks", func(c *gin.Context) {
+        var req CreateTaskReq
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+            return
+        }
+
+        now := time.Now()
+        store.mu.Lock()
+        store.nextID++
+        task := Task{
+            ID:          store.nextID,
+            Title:       req.Title,
+            Description: req.Description,
+            Status:      req.Status,
+            Priority:    req.Priority,
+            CreatedAt:   now,
+            UpdatedAt:   now,
+        }
+        store.tasks[task.ID] = task
+        store.mu.Unlock()
+
+        c.JSON(http.StatusCreated, gin.H{"data": task})
+    })
+
+    api.GET("/tasks", func(c *gin.Context) {
+        page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+        perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+        status := c.Query("status")
+        priority := c.Query("priority")
+
+        store.mu.RLock()
+        var filtered []Task
+        for _, t := range store.tasks {
+            if status != "" && t.Status != status { continue }
+            if priority != "" && t.Priority != priority { continue }
+            filtered = append(filtered, t)
+        }
+        store.mu.RUnlock()
+
+        total := len(filtered)
+        start := (page - 1) * perPage
+        if start > total { start = total }
+        end := start + perPage
+        if end > total { end = total }
+
+        c.JSON(http.StatusOK, gin.H{
+            "data": filtered[start:end],
+            "meta": gin.H{"page": page, "per_page": perPage, "total": total},
+        })
+    })
+
+    api.GET("/tasks/:id", func(c *gin.Context) {
+        id, _ := strconv.Atoi(c.Param("id"))
+        store.mu.RLock()
+        task, ok := store.tasks[id]
+        store.mu.RUnlock()
+        if !ok {
+            c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"data": task})
+    })
+
+    api.PUT("/tasks/:id", func(c *gin.Context) {
+        id, _ := strconv.Atoi(c.Param("id"))
+        var req UpdateTaskReq
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+            return
+        }
+
+        store.mu.Lock()
+        task, ok := store.tasks[id]
+        if !ok {
+            store.mu.Unlock()
+            c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+            return
+        }
+        if req.Title != nil { task.Title = *req.Title }
+        if req.Description != nil { task.Description = *req.Description }
+        if req.Status != nil { task.Status = *req.Status }
+        if req.Priority != nil { task.Priority = *req.Priority }
+        task.UpdatedAt = time.Now()
+        store.tasks[id] = task
+        store.mu.Unlock()
+
+        c.JSON(http.StatusOK, gin.H{"data": task})
+    })
+
+    api.DELETE("/tasks/:id", func(c *gin.Context) {
+        id, _ := strconv.Atoi(c.Param("id"))
+        store.mu.Lock()
+        _, ok := store.tasks[id]
+        if ok { delete(store.tasks, id) }
+        store.mu.Unlock()
+        if !ok {
+            c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+            return
+        }
+        c.Status(http.StatusNoContent)
+    })
+
+    r.Run(":8080")
+}
+```
+
+</details>
+
+## Key Takeaways
+
+- Gin provides a fast, ergonomic framework built on Go's `net/http` foundation
+- Route groups organize endpoints by resource and access level
+- Struct tag validation (`binding`) eliminates manual input checking boilerplate
+- Custom middleware enables clean separation of cross-cutting concerns
+- Consistent error response structures make APIs predictable for consumers
+- Clean architecture separates handlers, services, and repositories for testability
+
+## External Resources
+
+- [Gin Documentation](https://gin-gonic.com/docs/)
+- [Gin GitHub Repository](https://github.com/gin-gonic/gin)
+- [go-playground/validator](https://github.com/go-playground/validator)
+- [Gin Best Practices](https://github.com/gin-gonic/gin#dont-trust-all-proxies)
+- [Building RESTful APIs with Gin](https://go.dev/doc/tutorial/web-service-gin)

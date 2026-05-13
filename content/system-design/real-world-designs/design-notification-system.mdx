@@ -1,0 +1,423 @@
+---
+title: "Design a Notification System"
+slug: "design-notification-system"
+track: "system-design"
+module: "real-world-designs"
+difficulty: "Advanced"
+estimatedMinutes: 45
+prerequisites: ["message-queues", "rate-limiting-auth"]
+---
+
+## Learning Objectives
+
+- Design a multi-channel notification system (push, email, SMS)
+- Implement fan-out strategies for notifications targeting millions of users
+- Handle notification prioritization, rate limiting, and user preferences
+- Design template engines for personalized notification content
+- Track delivery status across channels with retry and fallback logic
+
+## Prerequisites
+
+- Understanding of message queues and event-driven architecture
+- Familiarity with rate limiting and API design
+- Knowledge of distributed systems and scaling patterns
+
+## Requirements
+
+### Functional Requirements
+
+1. Support push notifications (iOS/Android), email, and SMS
+2. Pluggable notification templates with personalization
+3. User preference management (channels, frequency, opt-out)
+4. Priority levels (urgent, high, medium, low)
+5. Delivery tracking and analytics
+6. Rate limiting per user to prevent notification fatigue
+
+### Non-Functional Requirements
+
+- **Throughput**: 10M notifications/hour at peak
+- **Latency**: Urgent notifications delivered within 30 seconds
+- **Reliability**: No lost notifications for critical alerts
+- **Scalability**: Handle fan-out to millions of users (broadcast)
+
+### Capacity Estimation
+
+```
+Volume: 10B notifications/month
+  Push: 60% = 6B
+  Email: 30% = 3B
+  SMS: 10% = 1B
+
+Peak throughput: 10M/hour = ~2,800 notifications/sec
+  Push: 1,700/sec
+  Email: 840/sec
+  SMS: 280/sec
+
+Storage (30-day retention for delivery logs):
+  10B × 200 bytes = 2 TB/month
+```
+
+## High-Level Architecture
+
+```mermaid
+graph TD
+    subgraph "Producers"
+        OrderSvc["Order Service"]
+        MarketSvc["Marketing Service"]
+        AlertSvc["Alert Service"]
+    end
+
+    subgraph "Notification Platform"
+        API["Notification API"]
+        Validator["Validation &<br/>Preference Check"]
+        Prioritizer["Priority Router"]
+
+        HighQ["High Priority Queue"]
+        MedQ["Medium Priority Queue"]
+        LowQ["Low Priority Queue"]
+
+        Workers["Notification Workers"]
+        Template["Template Engine"]
+        RateLimit["Rate Limiter"]
+    end
+
+    subgraph "Delivery Channels"
+        APNS["APNS<br/>(iOS Push)"]
+        FCM["FCM<br/>(Android Push)"]
+        SES["Email Provider<br/>(SES/SendGrid)"]
+        Twilio["SMS Provider<br/>(Twilio)"]
+    end
+
+    subgraph "Data"
+        UserPrefs[("User Preferences")]
+        Templates[("Template Store")]
+        DeliveryLog[("Delivery Log")]
+        DLQ["Dead Letter Queue"]
+    end
+
+    OrderSvc --> API
+    MarketSvc --> API
+    AlertSvc --> API
+
+    API --> Validator
+    Validator --> UserPrefs
+    Validator --> Prioritizer
+
+    Prioritizer --> HighQ
+    Prioritizer --> MedQ
+    Prioritizer --> LowQ
+
+    HighQ --> Workers
+    MedQ --> Workers
+    LowQ --> Workers
+
+    Workers --> Template
+    Workers --> RateLimit
+    Workers --> APNS
+    Workers --> FCM
+    Workers --> SES
+    Workers --> Twilio
+    Workers --> DeliveryLog
+    Workers -.->|"Failure"| DLQ
+```
+
+## Notification Flow
+
+### Step-by-Step
+
+```mermaid
+sequenceDiagram
+    participant Producer
+    participant API
+    participant Validator
+    participant Queue
+    participant Worker
+    participant Channel as Push/Email/SMS
+
+    Producer->>API: Send notification request
+    API->>API: Validate payload, authenticate
+
+    API->>Validator: Check user preferences
+    Validator->>Validator: User opted in? Channel enabled?
+
+    alt User opted out
+        Validator-->>API: Skip (preference denied)
+    end
+
+    Validator->>Validator: Check rate limit
+    alt Rate limit exceeded
+        Validator-->>API: Skip (rate limited)
+    end
+
+    Validator->>Queue: Enqueue with priority
+    API-->>Producer: 202 Accepted
+
+    Queue->>Worker: Dequeue notification
+    Worker->>Worker: Render template
+    Worker->>Channel: Deliver via channel API
+
+    alt Success
+        Channel-->>Worker: Delivered
+        Worker->>Worker: Log delivery
+    end
+
+    alt Failure
+        Channel-->>Worker: Error
+        Worker->>Queue: Retry (with backoff)
+    end
+```
+
+## Notification API Design
+
+```json
+// POST /v1/notifications
+{
+  "type": "order_shipped",
+  "priority": "high",
+  "recipients": [
+    {
+      "user_id": "user_123",
+      "channels": ["push", "email"]
+    }
+  ],
+  "template_id": "tmpl_order_shipped",
+  "template_data": {
+    "order_id": "ORD-456",
+    "tracking_number": "1Z999AA10123456784",
+    "estimated_delivery": "2024-11-15"
+  },
+  "idempotency_key": "order_456_shipped_v1",
+  "scheduled_at": null
+}
+```
+
+For broadcast notifications (millions of recipients):
+
+```json
+// POST /v1/notifications/broadcast
+{
+  "type": "product_launch",
+  "priority": "low",
+  "audience": {
+    "segment": "active_users_30d",
+    "filters": {
+      "country": ["US", "CA"],
+      "plan": ["pro", "enterprise"]
+    }
+  },
+  "template_id": "tmpl_product_launch",
+  "template_data": {
+    "product_name": "New Feature X"
+  },
+  "send_rate": 50000,
+  "idempotency_key": "product_x_launch_nov2024"
+}
+```
+
+## Template Engine
+
+### Template Design
+
+```
+Template: tmpl_order_shipped
+
+Push notification:
+  Title: "Your order is on its way! 📦"
+  Body: "Order {{order_id}} shipped via {{carrier}}. Track: {{tracking_number}}"
+
+Email:
+  Subject: "Your order {{order_id}} has shipped"
+  Body: (HTML template with tracking details, delivery estimate, order summary)
+
+SMS:
+  Body: "Your order {{order_id}} shipped. Track at {{tracking_url}}"
+```
+
+### Template Rendering Pipeline
+
+```mermaid
+graph LR
+    Raw["Raw Template<br/>+ Template Data"] --> Render["Template Engine<br/>(Handlebars/Mustache)"]
+    Render --> Personalize["Personalization<br/>(user name, locale)"]
+    Personalize --> Localize["Localization<br/>(language, timezone)"]
+    Localize --> Final["Final Content<br/>(per channel)"]
+```
+
+**Localization**: Store templates per locale (`tmpl_order_shipped_en`, `tmpl_order_shipped_es`). Render in the user's preferred language.
+
+## Fan-Out Strategy
+
+### Small Fan-Out (1-1000 recipients)
+
+Direct fan-out: Create one notification event per recipient and enqueue:
+
+```
+1 notification request → 500 recipients → 500 queue messages
+```
+
+### Large Fan-Out (1M+ recipients)
+
+Two-stage fan-out to avoid overwhelming the queue:
+
+```mermaid
+graph TD
+    Broadcast["Broadcast Request<br/>5M recipients"] --> Segmenter["Audience Segmenter"]
+    Segmenter --> Batch1["Batch 1<br/>50K users"]
+    Segmenter --> Batch2["Batch 2<br/>50K users"]
+    Segmenter --> BatchN["...<br/>Batch 100"]
+
+    Batch1 --> Q["Priority Queue"]
+    Batch2 --> Q
+    BatchN --> Q
+
+    Q --> W1["Worker Pool<br/>(auto-scaled)"]
+    W1 --> APNS["APNS Batch API"]
+    W1 --> FCM["FCM Batch API"]
+```
+
+**Batch APIs**: APNS supports 5,000 notifications per batch request. FCM supports 500 per batch. Use batch APIs to reduce HTTP overhead.
+
+**Send rate throttling**: Spread delivery over time (e.g., 50K/minute) to avoid overwhelming channel providers and to smooth server load.
+
+## Priority System
+
+### Priority Queues
+
+```mermaid
+graph TD
+    subgraph "Priority-Based Processing"
+        P1["P1: Critical<br/>Security alerts,<br/>2FA codes<br/>→ Process immediately"]
+        P2["P2: High<br/>Order updates,<br/>payment confirmations<br/>→ Process within 1 min"]
+        P3["P3: Medium<br/>Social interactions,<br/>comments, likes<br/>→ Process within 5 min"]
+        P4["P4: Low<br/>Marketing, digests,<br/>recommendations<br/>→ Process within 1 hour"]
+    end
+```
+
+Implementation: Separate Kafka topics or SQS queues per priority. Workers poll high-priority queues more frequently.
+
+## Rate Limiting Per User
+
+### Notification Fatigue Prevention
+
+```
+Rules:
+  - Max 5 push notifications per hour per user
+  - Max 3 emails per day per user
+  - Max 1 SMS per day per user
+  - Marketing notifications: max 2 per week per user
+  - Critical notifications (2FA, security): exempt from limits
+
+Implementation:
+  Redis sorted set per user: notifications sent in time window
+  ZADD user:123:push_notifications <timestamp> <notification_id>
+  ZRANGEBYSCORE user:123:push_notifications (now-3600) +inf → count
+```
+
+### Notification Aggregation
+
+Instead of 10 separate "someone liked your post" notifications, aggregate:
+
+```
+Individual: "Alice liked your post"
+            "Bob liked your post"
+            "Charlie liked your post"
+
+Aggregated: "Alice, Bob, and 8 others liked your post"
+```
+
+Aggregation requires a **delay window** (e.g., 5 minutes). If multiple similar notifications arrive within the window, combine them.
+
+## Delivery Tracking
+
+### Delivery States
+
+```mermaid
+stateDiagram-v2
+    [*] --> Created
+    Created --> Queued: Enqueued
+    Queued --> Processing: Worker picks up
+    Processing --> Sent: Channel API accepted
+    Sent --> Delivered: Device confirmed
+    Processing --> Failed: Channel API rejected
+    Failed --> Queued: Retry (max 3)
+    Failed --> DeadLetter: Max retries exceeded
+    Sent --> Clicked: User interacted
+```
+
+### Tracking Storage
+
+```sql
+CREATE TABLE delivery_log (
+    notification_id UUID,
+    user_id         UUID,
+    channel         TEXT,
+    status          TEXT,
+    provider_id     TEXT,
+    created_at      TIMESTAMP,
+    updated_at      TIMESTAMP,
+    error_message   TEXT,
+    retry_count     INT,
+    PRIMARY KEY (notification_id, channel)
+);
+```
+
+## Channel-Specific Considerations
+
+### Push Notifications (APNS/FCM)
+
+- **Device token management**: Tokens change on app reinstall, OS update. Handle `InvalidRegistration` by removing stale tokens.
+- **Payload size**: APNS max 4KB, FCM max 4KB. Keep payloads small; fetch details from server on tap.
+- **Silent push**: Background data sync without user-visible notification.
+
+### Email
+
+- **Bounce handling**: Hard bounces (invalid address) → remove from list. Soft bounces (mailbox full) → retry later.
+- **Reputation management**: High bounce rates or spam complaints affect sender reputation. Use dedicated IPs, DKIM, SPF, DMARC.
+- **Unsubscribe**: CAN-SPAM requires one-click unsubscribe link in every marketing email.
+
+### SMS
+
+- **Cost**: $0.01-0.05 per SMS. Most expensive channel.
+- **Character limit**: 160 characters (GSM-7) or 70 (Unicode).
+- **Regulatory**: TCPA compliance, opt-in requirements, quiet hours (no SMS between 9 PM - 8 AM).
+
+## Real-World Examples
+
+### Uber
+
+Uber sends notifications for trip updates, promotions, and safety alerts:
+- **Trip updates**: Push + SMS for critical (driver arrived, trip started)
+- **Promotions**: Push only, rate-limited to 2/day, preference-based
+- **Safety alerts**: All channels, bypasses rate limits, highest priority
+
+### Twitter / X
+
+- **Social notifications**: Aggregated ("5 people liked your tweet")
+- **Threshold-based**: Only notify for high engagement, not every like
+- **Digest emails**: Daily/weekly summaries for less active users
+
+## Interview Approach
+
+1. **Clarify channels**: Which channels? (push, email, SMS, in-app)
+2. **Estimate volume**: How many notifications/day? Peak throughput?
+3. **Design the pipeline**: API → validation → priority queue → workers → channels
+4. **Handle preferences**: User opt-in/out, channel selection, frequency limits
+5. **Fan-out strategy**: Direct for small audiences, batched for broadcasts
+6. **Reliability**: Retries, DLQ, idempotency, delivery tracking
+
+## Key Takeaways
+
+1. **Decouple with queues**: Producers publish events, workers consume and deliver. Never send notifications synchronously.
+2. **Priority queues prevent delays**: A marketing blast shouldn't delay a 2FA code.
+3. **Rate limit to prevent fatigue**: Users will disable notifications if overwhelmed.
+4. **Aggregate similar notifications**: "10 people liked" is better than 10 separate notifications.
+5. **Track delivery end-to-end**: From creation through delivery to interaction.
+6. **Respect user preferences**: Channels, frequency, quiet hours, and opt-out must be honored.
+
+## External Resources
+
+- [Apple Push Notification Service](https://developer.apple.com/documentation/usernotifications)
+- [Firebase Cloud Messaging](https://firebase.google.com/docs/cloud-messaging)
+- [AWS SES Best Practices](https://docs.aws.amazon.com/ses/latest/dg/best-practices.html)
+- [Twilio SMS API](https://www.twilio.com/docs/sms)
+- [Designing Notifications at Scale (Pinterest)](https://medium.com/pinterest-engineering)

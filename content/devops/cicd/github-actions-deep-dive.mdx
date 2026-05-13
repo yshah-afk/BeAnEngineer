@@ -1,0 +1,471 @@
+---
+title: "GitHub Actions Deep Dive"
+slug: "github-actions-deep-dive"
+track: "devops"
+module: "cicd"
+difficulty: "Intermediate"
+estimatedMinutes: 50
+prerequisites: ["docker-fundamentals"]
+---
+
+## Learning Objectives
+
+- Master GitHub Actions workflow syntax and triggers
+- Build efficient CI pipelines with matrix builds and caching
+- Create reusable workflows and composite actions
+- Configure environments with protection rules and OIDC authentication
+- Implement security best practices for actions and secrets
+
+## Prerequisites
+
+- Git and GitHub fundamentals
+- Docker basics (building and running images)
+- Familiarity with YAML syntax
+
+## Anatomy of a Workflow
+
+Every GitHub Actions workflow lives in `.github/workflows/` and is triggered by events.
+
+```yaml
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:    # Manual trigger
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options: [staging, production]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+```
+
+```mermaid
+graph LR
+    E[Event: push/PR] --> W[Workflow Triggered]
+    W --> J1[Job: lint]
+    W --> J2[Job: test]
+    J1 --> J3[Job: build]
+    J2 --> J3
+    J3 --> J4[Job: deploy]
+```
+
+## Jobs and Steps
+
+```yaml
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: test
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Run tests
+        run: npm test -- --coverage
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/test
+          REDIS_URL: redis://localhost:6379
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+```
+
+## Matrix Builds
+
+Test across multiple versions, OS, and configurations simultaneously.
+
+```yaml
+  test-matrix:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: [18, 20, 22]
+        exclude:
+          - os: macos-latest
+            node-version: 18
+        include:
+          - os: ubuntu-latest
+            node-version: 20
+            coverage: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm test
+
+      - if: matrix.coverage
+        run: npm test -- --coverage
+```
+
+## Caching Strategies
+
+Caching dramatically reduces pipeline time — often from 5+ minutes to under 1 minute for dependency installation.
+
+```yaml
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Automatic cache with setup-node
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # Manual cache for custom paths
+      - name: Cache build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            .next/cache
+            node_modules/.cache
+          key: build-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('src/**') }}
+          restore-keys: |
+            build-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-
+            build-${{ runner.os }}-
+
+      # Docker layer caching
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build with cache
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: ${{ env.IMAGE_NAME }}:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+```
+
+## Reusable Workflows
+
+Share workflow logic across repositories to eliminate duplication.
+
+```yaml
+# .github/workflows/reusable-deploy.yml
+name: Reusable Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      image-tag:
+        required: true
+        type: string
+    secrets:
+      AWS_ROLE_ARN:
+        required: true
+    outputs:
+      deploy-url:
+        description: "Deployment URL"
+        value: ${{ jobs.deploy.outputs.url }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Deploy to ECS
+        id: deploy
+        run: |
+          aws ecs update-service \
+            --cluster ${{ inputs.environment }} \
+            --service api \
+            --force-new-deployment \
+            --task-definition api:${{ inputs.image-tag }}
+          echo "url=https://${{ inputs.environment }}.example.com" >> "$GITHUB_OUTPUT"
+```
+
+```yaml
+# Caller workflow
+name: Release
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    # ... build and push image ...
+
+  deploy-staging:
+    needs: build
+    uses: ./.github/workflows/reusable-deploy.yml
+    with:
+      environment: staging
+      image-tag: ${{ needs.build.outputs.image-tag }}
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.STAGING_ROLE_ARN }}
+
+  deploy-production:
+    needs: deploy-staging
+    uses: ./.github/workflows/reusable-deploy.yml
+    with:
+      environment: production
+      image-tag: ${{ needs.build.outputs.image-tag }}
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.PROD_ROLE_ARN }}
+```
+
+## Environments and Protection Rules
+
+```mermaid
+graph LR
+    B[Build] --> S[Staging]
+    S -->|Auto-deploy| ST[Smoke Tests]
+    ST -->|Pass| P{Production}
+    P -->|Required Reviewers| D[Deploy]
+    P -->|Wait Timer: 10min| D
+```
+
+Configure environments in GitHub Settings with:
+- **Required reviewers** — manual approval gate
+- **Wait timer** — delay before deployment proceeds
+- **Deployment branches** — restrict which branches can deploy
+- **Environment secrets** — scoped to specific environments
+
+## OIDC Authentication
+
+Replace long-lived credentials with short-lived tokens from your cloud provider.
+
+```yaml
+permissions:
+  id-token: write    # Required for OIDC
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # AWS OIDC
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789:role/github-actions
+          aws-region: us-east-1
+
+      # GCP OIDC
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/123/locations/global/workloadIdentityPools/github/providers/github
+          service_account: deploy@project.iam.gserviceaccount.com
+
+      # Azure OIDC
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+```
+
+## Composite Actions
+
+Bundle multiple steps into a single reusable action.
+
+```yaml
+# .github/actions/setup-project/action.yml
+name: 'Setup Project'
+description: 'Install dependencies and setup tooling'
+inputs:
+  node-version:
+    description: 'Node.js version'
+    default: '20'
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: 'npm'
+
+    - run: npm ci
+      shell: bash
+
+    - run: npx playwright install --with-deps
+      shell: bash
+
+    - name: Verify installation
+      run: node --version && npm --version
+      shell: bash
+```
+
+## Security Best Practices
+
+```yaml
+# Pin actions to commit SHAs, not tags
+- uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+
+# Restrict permissions to minimum required
+permissions:
+  contents: read
+  pull-requests: write
+
+# Never echo secrets
+- run: |
+    # BAD: echo ${{ secrets.TOKEN }}
+    # GOOD: mask it
+    echo "::add-mask::${{ secrets.TOKEN }}"
+
+# Use environment protection for production deployments
+# Limit GITHUB_TOKEN permissions per job
+# Audit third-party actions before use
+```
+
+## Hands-On Exercise: Complete CI Pipeline
+
+### Exercise: Build a Full Pipeline
+
+```yaml
+# .github/workflows/ci.yml — create this in your repo
+name: Full CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+            frontend:
+              - 'frontend/**'
+
+  backend-ci:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Run backend tests here"
+
+  frontend-ci:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Run frontend tests here"
+
+  all-checks-pass:
+    if: always()
+    needs: [backend-ci, frontend-ci]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "Some checks failed"
+            exit 1
+          fi
+```
+
+## Key Takeaways
+
+- **Concurrency groups** prevent duplicate runs and save CI minutes
+- **Matrix builds** test across multiple environments in parallel
+- **Caching** (dependencies + Docker layers) is the single biggest speedup
+- **Reusable workflows** and **composite actions** eliminate cross-repo duplication
+- **OIDC** eliminates long-lived cloud credentials — use it everywhere
+- **Pin actions to SHAs** and set minimal `permissions` for security
+- Use **path filters** to skip jobs when irrelevant files change
+
+## External Resources
+
+- [GitHub Actions Documentation](https://docs.github.com/en/actions)
+- [Workflow Syntax Reference](https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions)
+- [Security Hardening for GitHub Actions](https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions)
+- [Reusable Workflows](https://docs.github.com/en/actions/using-workflows/reusing-workflows)
+- [OpenID Connect in GitHub Actions](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect)

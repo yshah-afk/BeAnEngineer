@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mastery-hub-config
+  namespace: mastery-hub
+  labels:
+    app.kubernetes.io/part-of: mastery-hub
+data:
+  MONGO_DB_NAME: mastery_hub
+  CONTENT_DIR: /content
+  OLLAMA_BASE_URL: http://ollama:11434
+  OLLAMA_MODEL: llama3
+  LOG_LEVEL: info
+  PORT: "8080"
+  FRONTEND_URL: http://frontend
+  SANDBOX_TIMEOUT: 30s
+  SANDBOX_MEMORY: 128m

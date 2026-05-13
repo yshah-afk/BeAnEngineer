@@ -1,0 +1,584 @@
+---
+title: "Unit Testing in Go"
+slug: "unit-testing"
+track: "golang"
+module: "testing-quality"
+difficulty: "Intermediate"
+estimatedMinutes: 40
+prerequisites: ["functions-methods"]
+---
+
+## Learning Objectives
+
+- Write effective unit tests using Go's `testing` package
+- Implement table-driven tests for comprehensive coverage
+- Use subtests for organized, filterable test execution
+- Create test fixtures and helpers for setup/teardown
+- Measure and improve code coverage
+- Write benchmarks to quantify performance
+
+## Prerequisites
+
+- Solid understanding of Go functions, methods, and interfaces
+- Familiarity with Go project structure and packages
+- Experience writing Go programs with error handling
+
+## Core Concepts
+
+### The Testing Package
+
+Go's testing is built into the language and toolchain. Test files live alongside the code they test, suffixed with `_test.go`.
+
+```go
+// calculator.go
+package calculator
+
+import "errors"
+
+var ErrDivisionByZero = errors.New("division by zero")
+
+func Add(a, b float64) float64 { return a + b }
+func Sub(a, b float64) float64 { return a - b }
+func Mul(a, b float64) float64 { return a * b }
+
+func Div(a, b float64) (float64, error) {
+    if b == 0 {
+        return 0, ErrDivisionByZero
+    }
+    return a / b, nil
+}
+```
+
+```go
+// calculator_test.go
+package calculator
+
+import (
+    "math"
+    "testing"
+)
+
+func TestAdd(t *testing.T) {
+    got := Add(2, 3)
+    want := 5.0
+    if got != want {
+        t.Errorf("Add(2, 3) = %v, want %v", got, want)
+    }
+}
+
+func TestDiv(t *testing.T) {
+    got, err := Div(10, 2)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+    if got != 5.0 {
+        t.Errorf("Div(10, 2) = %v, want 5.0", got)
+    }
+}
+
+func TestDivByZero(t *testing.T) {
+    _, err := Div(10, 0)
+    if err == nil {
+        t.Fatal("expected error for division by zero")
+    }
+    if err != ErrDivisionByZero {
+        t.Errorf("got error %v, want %v", err, ErrDivisionByZero)
+    }
+}
+```
+
+### Table-Driven Tests
+
+Table-driven tests are Go's idiomatic approach to testing multiple scenarios. They reduce repetition and make adding cases trivial.
+
+```go
+func TestCalculator(t *testing.T) {
+    tests := []struct {
+        name     string
+        op       func(float64, float64) float64
+        a, b     float64
+        expected float64
+    }{
+        {"add positive", Add, 2, 3, 5},
+        {"add negative", Add, -1, -2, -3},
+        {"add zero", Add, 0, 5, 5},
+        {"sub positive", Sub, 5, 3, 2},
+        {"sub negative", Sub, -1, 1, -2},
+        {"mul positive", Mul, 4, 3, 12},
+        {"mul by zero", Mul, 100, 0, 0},
+        {"mul negative", Mul, -2, 3, -6},
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got := tt.op(tt.a, tt.b)
+            if math.Abs(got-tt.expected) > 1e-9 {
+                t.Errorf("got %v, want %v", got, tt.expected)
+            }
+        })
+    }
+}
+
+func TestDiv_TableDriven(t *testing.T) {
+    tests := []struct {
+        name    string
+        a, b    float64
+        want    float64
+        wantErr error
+    }{
+        {"normal division", 10, 2, 5, nil},
+        {"divide by zero", 10, 0, 0, ErrDivisionByZero},
+        {"negative result", -10, 2, -5, nil},
+        {"fractional result", 1, 3, 0.333333, nil},
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got, err := Div(tt.a, tt.b)
+            if err != tt.wantErr {
+                t.Fatalf("Div(%v, %v) error = %v, wantErr %v", tt.a, tt.b, err, tt.wantErr)
+            }
+            if tt.wantErr == nil && math.Abs(got-tt.want) > 1e-4 {
+                t.Errorf("Div(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.want)
+            }
+        })
+    }
+}
+```
+
+### Subtests and Test Organization
+
+Subtests enable hierarchical test organization, selective execution, and parallel testing.
+
+```go
+func TestUserService(t *testing.T) {
+    svc := NewUserService(NewInMemoryRepo())
+
+    t.Run("Create", func(t *testing.T) {
+        t.Run("valid user", func(t *testing.T) {
+            user, err := svc.Create(context.Background(), &CreateUserInput{
+                Email: "test@example.com",
+                Name:  "Test User",
+            })
+            if err != nil {
+                t.Fatalf("unexpected error: %v", err)
+            }
+            if user.ID == "" {
+                t.Error("expected user ID to be set")
+            }
+        })
+
+        t.Run("duplicate email", func(t *testing.T) {
+            _, err := svc.Create(context.Background(), &CreateUserInput{
+                Email: "test@example.com",
+                Name:  "Another User",
+            })
+            if !errors.Is(err, ErrDuplicateEmail) {
+                t.Errorf("got %v, want %v", err, ErrDuplicateEmail)
+            }
+        })
+
+        t.Run("invalid email", func(t *testing.T) {
+            _, err := svc.Create(context.Background(), &CreateUserInput{
+                Email: "not-an-email",
+                Name:  "Bad Email User",
+            })
+            if err == nil {
+                t.Error("expected validation error")
+            }
+        })
+    })
+
+    t.Run("Get", func(t *testing.T) {
+        t.Run("existing user", func(t *testing.T) {
+            user, err := svc.GetByEmail(context.Background(), "test@example.com")
+            if err != nil {
+                t.Fatalf("unexpected error: %v", err)
+            }
+            if user.Name != "Test User" {
+                t.Errorf("got name %q, want %q", user.Name, "Test User")
+            }
+        })
+
+        t.Run("non-existing user", func(t *testing.T) {
+            _, err := svc.GetByEmail(context.Background(), "missing@example.com")
+            if !errors.Is(err, ErrNotFound) {
+                t.Errorf("got %v, want %v", err, ErrNotFound)
+            }
+        })
+    })
+}
+
+// Running specific subtests:
+// go test -run TestUserService/Create/valid_user
+// go test -run TestUserService/Get
+```
+
+### Test Fixtures and Helpers
+
+```go
+// testhelper_test.go
+package mypackage
+
+import (
+    "os"
+    "path/filepath"
+    "testing"
+)
+
+// t.Helper() marks this as a helper — test failures report the caller's line
+func assertEqual[T comparable](t *testing.T, got, want T) {
+    t.Helper()
+    if got != want {
+        t.Errorf("got %v, want %v", got, want)
+    }
+}
+
+func assertNoError(t *testing.T, err error) {
+    t.Helper()
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+}
+
+func assertError(t *testing.T, err error) {
+    t.Helper()
+    if err == nil {
+        t.Fatal("expected error, got nil")
+    }
+}
+
+// Test fixtures with t.TempDir() (auto-cleaned up)
+func setupTestFiles(t *testing.T) string {
+    t.Helper()
+    dir := t.TempDir()
+
+    files := map[string]string{
+        "config.json":   `{"port": 8080}`,
+        "data/users.csv": "id,name\n1,Alice\n2,Bob",
+    }
+
+    for name, content := range files {
+        path := filepath.Join(dir, name)
+        os.MkdirAll(filepath.Dir(path), 0755)
+        if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+            t.Fatal(err)
+        }
+    }
+
+    return dir
+}
+
+// TestMain for package-level setup/teardown
+func TestMain(m *testing.M) {
+    // Setup (runs once before all tests in the package)
+    setup()
+
+    // Run tests
+    code := m.Run()
+
+    // Teardown
+    teardown()
+
+    os.Exit(code)
+}
+```
+
+### Code Coverage
+
+```bash
+# Run tests with coverage
+go test -cover ./...
+
+# Generate coverage profile
+go test -coverprofile=coverage.out ./...
+
+# View coverage in browser
+go tool cover -html=coverage.out
+
+# Check coverage per function
+go tool cover -func=coverage.out
+
+# Set minimum coverage threshold in CI
+go test -coverprofile=coverage.out ./...
+COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+if (( $(echo "$COVERAGE < 80" | bc -l) )); then
+    echo "Coverage $COVERAGE% is below 80% threshold"
+    exit 1
+fi
+```
+
+### Benchmarks
+
+```go
+func BenchmarkAdd(b *testing.B) {
+    for i := 0; i < b.N; i++ {
+        Add(float64(i), float64(i+1))
+    }
+}
+
+func BenchmarkFibonacci(b *testing.B) {
+    cases := []struct {
+        name string
+        n    int
+    }{
+        {"fib-10", 10},
+        {"fib-20", 20},
+        {"fib-30", 30},
+    }
+
+    for _, tc := range cases {
+        b.Run(tc.name, func(b *testing.B) {
+            for i := 0; i < b.N; i++ {
+                Fibonacci(tc.n)
+            }
+        })
+    }
+}
+
+// Benchmark with setup cost excluded
+func BenchmarkProcessLargeSlice(b *testing.B) {
+    data := make([]int, 1_000_000)
+    for i := range data {
+        data[i] = i
+    }
+
+    b.ResetTimer() // exclude setup from measurement
+    for i := 0; i < b.N; i++ {
+        ProcessSlice(data)
+    }
+}
+
+// Memory allocation benchmark
+func BenchmarkStringConcat(b *testing.B) {
+    b.Run("plus operator", func(b *testing.B) {
+        b.ReportAllocs()
+        for i := 0; i < b.N; i++ {
+            s := ""
+            for j := 0; j < 100; j++ {
+                s += "x"
+            }
+            _ = s
+        }
+    })
+
+    b.Run("strings.Builder", func(b *testing.B) {
+        b.ReportAllocs()
+        for i := 0; i < b.N; i++ {
+            var sb strings.Builder
+            for j := 0; j < 100; j++ {
+                sb.WriteString("x")
+            }
+            _ = sb.String()
+        }
+    })
+}
+```
+
+```bash
+# Run benchmarks
+go test -bench=. -benchmem ./...
+
+# Compare benchmarks (with benchstat)
+go test -bench=. -count=10 > old.txt
+# make changes
+go test -bench=. -count=10 > new.txt
+benchstat old.txt new.txt
+```
+
+### Parallel Tests
+
+```go
+func TestParallel(t *testing.T) {
+    tests := []struct {
+        name  string
+        input string
+        want  string
+    }{
+        {"uppercase", "hello", "HELLO"},
+        {"lowercase", "WORLD", "world"},
+        {"mixed", "GoLang", "golang"},
+    }
+
+    for _, tt := range tests {
+        tt := tt // capture range variable
+        t.Run(tt.name, func(t *testing.T) {
+            t.Parallel() // mark as safe to run in parallel
+            got := strings.ToLower(tt.input)
+            if got != tt.want {
+                t.Errorf("ToLower(%q) = %q, want %q", tt.input, got, tt.want)
+            }
+        })
+    }
+}
+```
+
+## Best Practices
+
+1. **Use table-driven tests** — they're the Go community standard for comprehensive testing
+2. **Name tests descriptively** — `TestUserService_Create_WithDuplicateEmail` tells you exactly what failed
+3. **Use `t.Helper()`** — makes helper function failures report the caller's line number
+4. **Use `t.Parallel()`** — speed up test suites by running independent tests concurrently
+5. **Test behavior, not implementation** — tests should survive refactoring
+6. **Use `t.Fatalf` for prerequisites, `t.Errorf` for assertions** — Fatal stops the test; Error continues
+
+## Common Pitfalls
+
+```go
+// PITFALL: Not capturing loop variable in parallel tests (pre Go 1.22)
+for _, tt := range tests {
+    t.Run(tt.name, func(t *testing.T) {
+        t.Parallel()
+        // tt may have changed by the time this runs!
+        assertEqual(t, process(tt.input), tt.want)
+    })
+}
+// FIX: tt := tt before the t.Run
+
+// PITFALL: Testing unexported functions directly
+// Often indicates the function should be tested through public API
+
+// PITFALL: Flaky tests due to timing
+func TestTimeout(t *testing.T) {
+    time.Sleep(100 * time.Millisecond) // may be slow on CI
+}
+// FIX: Use channels and select with generous timeouts
+```
+
+## Hands-On Exercises
+
+### Exercise 1: Complete Test Suite
+
+Write a comprehensive test suite for a `StringSet` type with methods: `Add`, `Remove`, `Contains`, `Size`, `Union`, `Intersection`. Include table-driven tests, edge cases, and benchmarks.
+
+<details>
+<summary>Solution</summary>
+
+```go
+package collections
+
+import "testing"
+
+func TestStringSet(t *testing.T) {
+    t.Run("Add and Contains", func(t *testing.T) {
+        tests := []struct {
+            name     string
+            add      []string
+            check    string
+            expected bool
+        }{
+            {"existing element", []string{"a", "b", "c"}, "b", true},
+            {"missing element", []string{"a", "b"}, "c", false},
+            {"empty set", nil, "a", false},
+            {"duplicate add", []string{"a", "a", "a"}, "a", true},
+        }
+
+        for _, tt := range tests {
+            t.Run(tt.name, func(t *testing.T) {
+                s := NewStringSet()
+                for _, item := range tt.add {
+                    s.Add(item)
+                }
+                if got := s.Contains(tt.check); got != tt.expected {
+                    t.Errorf("Contains(%q) = %v, want %v", tt.check, got, tt.expected)
+                }
+            })
+        }
+    })
+
+    t.Run("Size", func(t *testing.T) {
+        s := NewStringSet()
+        assertEqual(t, s.Size(), 0)
+        s.Add("a")
+        assertEqual(t, s.Size(), 1)
+        s.Add("a") // duplicate
+        assertEqual(t, s.Size(), 1)
+        s.Add("b")
+        assertEqual(t, s.Size(), 2)
+    })
+
+    t.Run("Remove", func(t *testing.T) {
+        s := NewStringSet("a", "b", "c")
+        s.Remove("b")
+        if s.Contains("b") {
+            t.Error("set should not contain 'b' after removal")
+        }
+        assertEqual(t, s.Size(), 2)
+
+        s.Remove("nonexistent") // should not panic
+        assertEqual(t, s.Size(), 2)
+    })
+
+    t.Run("Union", func(t *testing.T) {
+        a := NewStringSet("1", "2", "3")
+        b := NewStringSet("3", "4", "5")
+        union := a.Union(b)
+
+        assertEqual(t, union.Size(), 5)
+        for _, item := range []string{"1", "2", "3", "4", "5"} {
+            if !union.Contains(item) {
+                t.Errorf("union should contain %q", item)
+            }
+        }
+    })
+
+    t.Run("Intersection", func(t *testing.T) {
+        a := NewStringSet("1", "2", "3")
+        b := NewStringSet("2", "3", "4")
+        inter := a.Intersection(b)
+
+        assertEqual(t, inter.Size(), 2)
+        if !inter.Contains("2") || !inter.Contains("3") {
+            t.Error("intersection should contain '2' and '3'")
+        }
+        if inter.Contains("1") || inter.Contains("4") {
+            t.Error("intersection should not contain '1' or '4'")
+        }
+    })
+}
+
+func BenchmarkStringSet_Add(b *testing.B) {
+    s := NewStringSet()
+    b.ResetTimer()
+    for i := 0; i < b.N; i++ {
+        s.Add(fmt.Sprintf("item-%d", i))
+    }
+}
+
+func BenchmarkStringSet_Contains(b *testing.B) {
+    s := NewStringSet()
+    for i := 0; i < 10000; i++ {
+        s.Add(fmt.Sprintf("item-%d", i))
+    }
+    b.ResetTimer()
+    for i := 0; i < b.N; i++ {
+        s.Contains(fmt.Sprintf("item-%d", i%10000))
+    }
+}
+
+func assertEqual[T comparable](t *testing.T, got, want T) {
+    t.Helper()
+    if got != want {
+        t.Errorf("got %v, want %v", got, want)
+    }
+}
+```
+
+</details>
+
+## Key Takeaways
+
+- Go testing is convention-based: `_test.go` files, `Test*` functions, `testing.T` parameter
+- Table-driven tests are the community standard for covering multiple scenarios
+- Use `t.Helper()` in test utilities and `t.Parallel()` for independent tests
+- `t.Fatalf` for prerequisites, `t.Errorf` for assertions — know when to stop vs continue
+- Benchmarks with `b.ReportAllocs()` reveal allocation-heavy code
+- Coverage is a guide, not a goal — aim for meaningful tests, not 100% line coverage
+
+## External Resources
+
+- [Go Testing Package](https://pkg.go.dev/testing)
+- [Go Blog: Table Driven Tests](https://go.dev/wiki/TableDrivenTests)
+- [Dave Cheney: Test Fixtures in Go](https://dave.cheney.net/2016/05/10/test-fixtures-in-go)
+- [Go Blog: Using Subtests and Sub-benchmarks](https://go.dev/blog/subtests)
+- [benchstat tool](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat)

@@ -1,0 +1,397 @@
+---
+title: "Tailwind CSS Mastery"
+slug: "tailwind-css-mastery"
+track: "react"
+module: "styling-and-ui"
+difficulty: "Intermediate"
+estimatedMinutes: 45
+prerequisites: ["react-vite-setup", "components-jsx"]
+---
+
+## Learning Objectives
+
+- Apply the utility-first philosophy to build UIs faster with Tailwind CSS
+- Implement responsive design with mobile-first breakpoints
+- Configure dark mode with class-based toggling and system preference detection
+- Build custom plugins and design tokens for consistent styling
+- Use the `cn()` utility for conditional class composition
+
+## Prerequisites
+
+- Basic CSS knowledge (box model, flexbox, grid)
+- React component structure and JSX
+- Vite project setup
+
+## Core Concepts
+
+### Why Utility-First CSS?
+
+Traditional CSS approaches create a mapping problem: you write classes like `.card-header`, then hunt through stylesheets to understand what they do. Utility-first inverts this — you read the styles directly in the markup.
+
+```mermaid
+flowchart LR
+    subgraph "Traditional CSS"
+        HTML1[class="card-header"] --> CSS1[.card-header in styles.css]
+        CSS1 --> Result1[display: flex, padding: 1rem, ...]
+    end
+
+    subgraph "Utility-First (Tailwind)"
+        HTML2["class='flex p-4 border-b font-semibold'"] --> Result2[Styles visible in markup]
+    end
+```
+
+### Setup with Vite
+
+```bash
+npm install -D tailwindcss @tailwindcss/vite
+```
+
+```typescript
+// vite.config.ts
+import tailwindcss from "@tailwindcss/vite";
+
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+});
+```
+
+```css
+/* src/index.css */
+@import "tailwindcss";
+```
+
+### Responsive Design (Mobile-First)
+
+Tailwind uses mobile-first breakpoints. Unprefixed utilities apply to all sizes; prefixed utilities apply at that breakpoint and above.
+
+```typescript
+function ProductGrid({ products }: { products: Product[] }) {
+  return (
+    <div className="grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:gap-6">
+      {products.map((product) => (
+        <div
+          key={product.id}
+          className="rounded-lg border bg-white p-4 shadow-sm
+                     hover:shadow-md transition-shadow
+                     sm:p-5 lg:p-6"
+        >
+          <img
+            src={product.image}
+            alt={product.name}
+            className="aspect-square w-full rounded-md object-cover"
+          />
+          <h3 className="mt-3 text-sm font-medium sm:text-base">{product.name}</h3>
+          <p className="mt-1 text-lg font-bold">${product.price}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+**Breakpoint reference:**
+
+| Prefix | Min-width | Typical device |
+|--------|-----------|----------------|
+| `sm:` | 640px | Landscape phones |
+| `md:` | 768px | Tablets |
+| `lg:` | 1024px | Laptops |
+| `xl:` | 1280px | Desktops |
+| `2xl:` | 1536px | Large screens |
+
+### Dark Mode
+
+```css
+/* src/index.css */
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+```
+
+```typescript
+function useTheme() {
+  const [theme, setTheme] = useState<"light" | "dark" | "system">(() => {
+    return (localStorage.getItem("theme") as "light" | "dark" | "system") ?? "system";
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+
+    if (theme === "system") {
+      const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+      root.classList.toggle("dark", prefersDark);
+
+      const handler = (e: MediaQueryListEvent) => root.classList.toggle("dark", e.matches);
+      const mql = window.matchMedia("(prefers-color-scheme: dark)");
+      mql.addEventListener("change", handler);
+      return () => mql.removeEventListener("change", handler);
+    }
+
+    root.classList.toggle("dark", theme === "dark");
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  return { theme, setTheme };
+}
+
+function ThemeToggle() {
+  const { theme, setTheme } = useTheme();
+
+  return (
+    <div className="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-gray-800">
+      {(["light", "dark", "system"] as const).map((mode) => (
+        <button
+          key={mode}
+          onClick={() => setTheme(mode)}
+          className={`rounded-md px-3 py-1.5 text-sm capitalize
+            ${theme === mode
+              ? "bg-white shadow dark:bg-gray-700 dark:text-white"
+              : "text-gray-600 hover:text-gray-900 dark:text-gray-400"
+            }`}
+        >
+          {mode}
+        </button>
+      ))}
+    </div>
+  );
+}
+```
+
+Using dark mode in components:
+
+```typescript
+function Card({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-6 shadow-sm
+                    dark:border-gray-700 dark:bg-gray-800 dark:shadow-none">
+      <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+        {title}
+      </h2>
+      <div className="mt-2 text-gray-600 dark:text-gray-300">
+        {children}
+      </div>
+    </div>
+  );
+}
+```
+
+### Design Tokens with CSS Custom Properties
+
+```css
+/* src/index.css */
+@import "tailwindcss";
+
+@theme {
+  --color-brand-50: #eff6ff;
+  --color-brand-100: #dbeafe;
+  --color-brand-500: #3b82f6;
+  --color-brand-600: #2563eb;
+  --color-brand-700: #1d4ed8;
+  --color-brand-900: #1e3a5f;
+
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+
+  --font-family-sans: "Inter", system-ui, sans-serif;
+  --font-family-mono: "JetBrains Mono", monospace;
+
+  --spacing-page: 1.5rem;
+
+  --radius-card: 0.75rem;
+}
+
+@media (width >= 1024px) {
+  @theme {
+    --spacing-page: 3rem;
+  }
+}
+```
+
+Now use them directly:
+
+```typescript
+<button className="rounded-card bg-brand-500 px-4 py-2 text-white hover:bg-brand-600">
+  Submit
+</button>
+```
+
+### The cn() Utility
+
+Merge Tailwind classes conditionally without conflicts:
+
+```bash
+npm install clsx tailwind-merge
+```
+
+```typescript
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+```
+
+```typescript
+interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: "primary" | "secondary" | "danger" | "ghost";
+  size?: "sm" | "md" | "lg";
+}
+
+function Button({
+  variant = "primary",
+  size = "md",
+  className,
+  children,
+  ...props
+}: ButtonProps) {
+  return (
+    <button
+      className={cn(
+        "inline-flex items-center justify-center rounded-md font-medium transition-colors",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2",
+        "disabled:pointer-events-none disabled:opacity-50",
+        {
+          "bg-blue-600 text-white hover:bg-blue-700": variant === "primary",
+          "border border-gray-300 bg-white hover:bg-gray-50": variant === "secondary",
+          "bg-red-600 text-white hover:bg-red-700": variant === "danger",
+          "hover:bg-gray-100": variant === "ghost",
+        },
+        {
+          "h-8 px-3 text-sm": size === "sm",
+          "h-10 px-4": size === "md",
+          "h-12 px-6 text-lg": size === "lg",
+        },
+        className
+      )}
+      {...props}
+    >
+      {children}
+    </button>
+  );
+}
+
+// Usage — consumer can override styles
+<Button variant="primary" size="lg" className="w-full">
+  Sign In
+</Button>
+```
+
+### Custom Plugin Example
+
+```typescript
+// tailwind-plugins/animate.ts
+import plugin from "tailwindcss/plugin";
+
+export const animatePlugin = plugin(({ addUtilities, matchUtilities, theme }) => {
+  addUtilities({
+    ".animate-fade-in": {
+      animation: "fade-in 0.3s ease-out",
+    },
+    ".animate-slide-up": {
+      animation: "slide-up 0.3s ease-out",
+    },
+    "@keyframes fade-in": {
+      from: { opacity: "0" },
+      to: { opacity: "1" },
+    },
+    "@keyframes slide-up": {
+      from: { opacity: "0", transform: "translateY(8px)" },
+      to: { opacity: "1", transform: "translateY(0)" },
+    },
+  });
+
+  matchUtilities(
+    {
+      "animate-delay": (value: string) => ({
+        animationDelay: value,
+      }),
+    },
+    { values: { 75: "75ms", 150: "150ms", 300: "300ms", 500: "500ms" } }
+  );
+});
+```
+
+### Common Layout Patterns
+
+```typescript
+// Centered content with max width
+function PageLayout({ children }: { children: ReactNode }) {
+  return (
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      {children}
+    </div>
+  );
+}
+
+// Sticky header
+function AppHeader() {
+  return (
+    <header className="sticky top-0 z-40 border-b bg-white/80 backdrop-blur-sm dark:bg-gray-900/80">
+      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4">
+        <Logo />
+        <Navigation />
+      </div>
+    </header>
+  );
+}
+
+// Holy grail layout
+function DashboardLayout({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex h-screen flex-col">
+      <AppHeader />
+      <div className="flex flex-1 overflow-hidden">
+        <aside className="hidden w-64 overflow-y-auto border-r lg:block">
+          <Sidebar />
+        </aside>
+        <main className="flex-1 overflow-y-auto p-6">{children}</main>
+      </div>
+    </div>
+  );
+}
+```
+
+## Best Practices
+
+1. **Extract repeated patterns** — use `cn()` and component props, not `@apply`
+2. **Mobile-first** — design for small screens first, enhance with `sm:`, `md:`, `lg:`
+3. **Design tokens** — define colors, spacing, and fonts in the theme, not hardcoded
+4. **Dark mode from the start** — adding it later means revisiting every component
+5. **Use `cn()` for composable components** — let consumers extend styles without fights
+6. **Avoid `@apply` in CSS files** — it defeats the purpose of utility-first and breaks extraction
+
+## Anti-Patterns to Avoid
+
+- **String concatenation for classes** — use `cn()` or `clsx` for conditional classes
+- **Inline style objects** — they can't be responsive, can't do hover/focus, and break consistency
+- **Creating CSS files per component** — Tailwind utilities belong in JSX, not separate files
+- **Hardcoded colors** — always reference theme tokens: `bg-brand-500`, not `bg-[#3b82f6]`
+- **Over-using arbitrary values** — `text-[17px]` suggests missing design tokens
+
+## Hands-On Exercise
+
+### Build a Marketing Landing Page
+
+1. Create a responsive hero section with headline, subtitle, CTA button, and illustration
+2. Build a feature grid that shows 1 column on mobile, 2 on tablet, 3 on desktop
+3. Implement dark mode with a toggle in the navigation
+4. Define design tokens for your brand colors, font family, and spacing scale
+5. Create reusable `Button`, `Badge`, and `Card` components using `cn()` with variant props
+6. Add a pricing table with hover effects and a "Popular" badge highlight
+
+## Key Takeaways
+
+- Utility-first CSS eliminates the context switch between markup and stylesheets
+- Mobile-first breakpoints match natural design progression from simple to complex
+- Dark mode with class strategy gives you full control over the toggle mechanism
+- Design tokens in the Tailwind theme ensure consistency across the entire application
+- The `cn()` utility (clsx + tailwind-merge) is essential for composable component APIs
+
+## External Resources
+
+- [Tailwind CSS Documentation](https://tailwindcss.com/docs)
+- [Tailwind CSS with Vite](https://tailwindcss.com/docs/installation/vite)
+- [tailwind-merge Documentation](https://github.com/dcastil/tailwind-merge)
+- [Refactoring UI](https://www.refactoringui.com/) — design principles from Tailwind's creators
+- [Tailwind CSS v4 Blog Post](https://tailwindcss.com/blog/tailwindcss-v4)

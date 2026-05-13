@@ -1,0 +1,70 @@
+{
+  "module_slug": "arrays-strings",
+  "questions": [
+    {
+      "id": "q1",
+      "text": "What is the time complexity of the two-pointer approach for finding a pair with a given sum in a sorted array?",
+      "options": [
+        "O(n²)",
+        "O(n log n)",
+        "O(n)",
+        "O(log n)"
+      ],
+      "correct": "O(n)",
+      "explanation": "The two-pointer technique starts with pointers at both ends and moves them inward based on the current sum. Each pointer moves at most n times total, so the entire process is O(n). This is a significant improvement over the O(n²) brute-force approach of checking all pairs.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q2",
+      "text": "In the sliding window technique, what determines when to shrink the window (move the left pointer)?",
+      "options": [
+        "When the window reaches a fixed size k",
+        "When the window violates the problem's constraint (e.g., sum exceeds target)",
+        "When the right pointer reaches the end of the array",
+        "After every expansion of the right pointer"
+      ],
+      "correct": "When the window violates the problem's constraint (e.g., sum exceeds target)",
+      "explanation": "In a variable-size sliding window, you expand by moving the right pointer and shrink by moving the left pointer when the current window violates the constraint. For example, in 'minimum subarray with sum ≥ target', you shrink when the sum meets or exceeds the target to find the minimum length.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q3",
+      "text": "Why is concatenating strings in a loop (like result += char) considered O(n²) in most languages?",
+      "options": [
+        "Because the loop itself runs n times",
+        "Because each concatenation creates a new string and copies all previous characters",
+        "Because hash computation for strings is O(n)",
+        "Because memory allocation is always O(n)"
+      ],
+      "correct": "Because each concatenation creates a new string and copies all previous characters",
+      "explanation": "Strings are immutable in Go and Python, so result += char creates a brand new string each time, copying all existing characters plus the new one. The copies grow: 1 + 2 + 3 + ... + n = O(n²). Using strings.Builder (Go) or ''.join() (Python) avoids this by batching the work.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q4",
+      "text": "In the 'Subarray Sum Equals K' problem, why do we initialize the prefix count hash map with {0: 1}?",
+      "options": [
+        "To handle the case where k equals 0",
+        "To handle subarrays that start from index 0 (where the prefix sum itself equals k)",
+        "To avoid division by zero errors",
+        "To ensure the hash map is never empty during the first iteration"
+      ],
+      "correct": "To handle subarrays that start from index 0 (where the prefix sum itself equals k)",
+      "explanation": "When prefix_sum equals k at some index, the complement is prefix_sum - k = 0. Without {0: 1} in the map, we'd miss these subarrays that start from the beginning. The initial entry represents the 'empty prefix' with sum 0 that exists before the first element.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q5",
+      "text": "What is the time complexity of querying a range sum using a precomputed prefix sum array?",
+      "options": [
+        "O(n) — must iterate through the range",
+        "O(log n) — uses binary search on the prefix array",
+        "O(1) — just subtract two precomputed values",
+        "O(n²) — must check all subarrays"
+      ],
+      "correct": "O(1) — just subtract two precomputed values",
+      "explanation": "After O(n) preprocessing to build the prefix sum array, any range sum query is just prefix[right+1] - prefix[left], which is O(1). This is the key benefit of prefix sums: trade O(n) preprocessing time for O(1) per query, which is worthwhile when you have many queries.",
+      "type": "single_choice"
+    }
+  ]
+}

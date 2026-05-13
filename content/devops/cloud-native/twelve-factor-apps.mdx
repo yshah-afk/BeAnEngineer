@@ -1,0 +1,438 @@
+---
+title: "Twelve-Factor Apps"
+slug: "twelve-factor-apps"
+track: "devops"
+module: "cloud-native"
+difficulty: "Intermediate"
+estimatedMinutes: 45
+prerequisites: ["docker-fundamentals", "k8s-architecture"]
+---
+
+## Learning Objectives
+
+- Understand the twelve-factor methodology and why it matters for cloud-native development
+- Apply each factor to real application architecture decisions
+- Compare microservices vs monolith and when to choose each
+- Implement the strangler fig pattern for incremental modernization
+- Design applications that are portable, scalable, and operationally excellent
+
+## Prerequisites
+
+- Docker fundamentals and container concepts
+- Basic Kubernetes understanding
+- Experience building and deploying web applications
+
+## What is the Twelve-Factor Methodology?
+
+The twelve-factor methodology is a set of principles for building software-as-a-service apps that are portable between execution environments, suitable for deployment on cloud platforms, and scalable without significant changes to tooling or architecture.
+
+Originally published by Heroku engineers, these principles have become the foundation of cloud-native development.
+
+```mermaid
+graph TB
+    subgraph "12 Factors"
+        F1[1. Codebase]
+        F2[2. Dependencies]
+        F3[3. Config]
+        F4[4. Backing Services]
+        F5[5. Build, Release, Run]
+        F6[6. Processes]
+        F7[7. Port Binding]
+        F8[8. Concurrency]
+        F9[9. Disposability]
+        F10[10. Dev/Prod Parity]
+        F11[11. Logs]
+        F12[12. Admin Processes]
+    end
+```
+
+## The Twelve Factors in Practice
+
+### 1. Codebase — One Codebase, Many Deploys
+
+One repo per app. The same codebase is deployed to dev, staging, and production with different configurations.
+
+```mermaid
+graph LR
+    GIT[(Git Repo)] -->|deploy| DEV[Development]
+    GIT -->|deploy| STG[Staging]
+    GIT -->|deploy| PROD[Production]
+
+    DEV -.-|"same code,<br/>different config"| STG
+    STG -.-|"same code,<br/>different config"| PROD
+```
+
+**Violation:** Separate repos for staging and production versions of the same app.
+**Correct:** Feature flags and environment configuration control differences.
+
+### 2. Dependencies — Explicitly Declare and Isolate
+
+Never rely on system-wide packages. Every dependency is declared in a manifest and isolated.
+
+```json
+// package.json — explicit dependency declaration
+{
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "redis": "^4.7.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
+```
+
+```dockerfile
+# Dockerfile isolates dependencies completely
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev
+COPY . .
+CMD ["node", "server.js"]
+```
+
+### 3. Config — Store Config in the Environment
+
+Configuration that varies between deploys (database URLs, API keys, feature flags) belongs in environment variables, not in code.
+
+```typescript
+// Config from environment — never hardcode
+const config = {
+  databaseUrl: process.env.DATABASE_URL,
+  redisUrl: process.env.REDIS_URL,
+  port: parseInt(process.env.PORT || '8080'),
+  logLevel: process.env.LOG_LEVEL || 'info',
+  enableNewFeature: process.env.FF_NEW_FEATURE === 'true',
+};
+
+if (!config.databaseUrl) {
+  throw new Error('DATABASE_URL is required');
+}
+```
+
+```yaml
+# Kubernetes: inject config via ConfigMap and Secret
+env:
+  - name: DATABASE_URL
+    valueFrom:
+      secretKeyRef:
+        name: db-credentials
+        key: connection-string
+  - name: LOG_LEVEL
+    valueFrom:
+      configMapKeyRef:
+        name: app-config
+        key: log_level
+```
+
+### 4. Backing Services — Treat as Attached Resources
+
+Databases, message queues, caches, and APIs should be swappable without code changes.
+
+```mermaid
+graph LR
+    APP[Application] -->|DATABASE_URL| PG[(PostgreSQL)]
+    APP -->|REDIS_URL| RD[(Redis)]
+    APP -->|SMTP_URL| EM[Email Service]
+    APP -->|S3_BUCKET| S3[(S3 Storage)]
+
+    PG -.->|"Swap: local → RDS<br/>No code change"| RDS[(Amazon RDS)]
+```
+
+```typescript
+// The app doesn't know (or care) if it's local Postgres or RDS
+import { Pool } from 'pg';
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+```
+
+### 5. Build, Release, Run — Strictly Separate Stages
+
+```mermaid
+graph LR
+    B[Build Stage<br/>Code → Artifact] -->|"v2.1.0 + staging config"| R[Release Stage<br/>Artifact + Config]
+    R --> RUN[Run Stage<br/>Execute in environment]
+
+    B2[Build Stage<br/>Same artifact] -->|"v2.1.0 + prod config"| R2[Release Stage]
+    R2 --> RUN2[Run Stage]
+```
+
+The same build artifact deploys everywhere. Only the configuration changes.
+
+### 6. Processes — Execute as Stateless Processes
+
+Application processes should be stateless and share-nothing. Any data that needs to persist must live in a backing service.
+
+```typescript
+// BAD: In-memory session store (state in process)
+const sessions = new Map();
+app.use((req, res, next) => {
+  sessions.set(req.sessionId, { user: req.user });
+});
+
+// GOOD: External session store (stateless process)
+import RedisStore from 'connect-redis';
+app.use(session({
+  store: new RedisStore({ client: redisClient }),
+  secret: process.env.SESSION_SECRET,
+}));
+```
+
+### 7. Port Binding — Export Services via Port Binding
+
+The app is self-contained — it doesn't need an external web server.
+
+```typescript
+// The app binds to a port and serves HTTP directly
+const app = express();
+const port = process.env.PORT || 8080;
+app.listen(port, () => {
+  console.log(`Listening on port ${port}`);
+});
+```
+
+### 8. Concurrency — Scale Out via the Process Model
+
+Scale by running more processes, not by making one process bigger.
+
+```mermaid
+graph TB
+    subgraph "Scale Up (Bad)"
+        BIG[1 Big Server<br/>64 CPU, 256GB RAM]
+    end
+
+    subgraph "Scale Out (Good)"
+        S1[Web x3]
+        S2[Worker x5]
+        S3[Scheduler x1]
+    end
+```
+
+```yaml
+# Different process types, scaled independently
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 3    # Scale web tier independently
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  replicas: 5    # Scale workers based on queue depth
+```
+
+### 9. Disposability — Fast Startup and Graceful Shutdown
+
+Processes should start fast and shut down cleanly.
+
+```typescript
+// Graceful shutdown
+const server = app.listen(port);
+
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, shutting down gracefully');
+
+  server.close(() => {
+    console.log('HTTP server closed');
+  });
+
+  await db.end();
+  await redis.quit();
+  await messageQueue.close();
+
+  process.exit(0);
+});
+```
+
+### 10. Dev/Prod Parity — Keep Environments Similar
+
+Minimize gaps between development and production.
+
+```yaml
+# docker-compose.yml — local dev mirrors production
+services:
+  app:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql://dev:dev@postgres:5432/myapp
+      - REDIS_URL=redis://redis:6379
+  postgres:
+    image: postgres:16-alpine    # Same version as production
+  redis:
+    image: redis:7-alpine        # Same version as production
+```
+
+### 11. Logs — Treat as Event Streams
+
+Write to stdout/stderr. Let the platform handle collection and routing.
+
+```typescript
+// Write to stdout — the platform (K8s, Cloud Run) collects them
+console.log(JSON.stringify({
+  level: 'info',
+  msg: 'Request handled',
+  path: '/api/users',
+  status: 200,
+  duration_ms: 45,
+}));
+```
+
+### 12. Admin Processes — Run as One-Off Tasks
+
+Database migrations, console sessions, and scripts run as one-off processes in the same environment.
+
+```bash
+# Kubernetes Job for database migration
+kubectl run migration --image=my-app:2.1 --restart=Never -- \
+  python manage.py migrate
+
+# Or as a Job manifest
+```
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migration
+spec:
+  template:
+    spec:
+      containers:
+        - name: migrate
+          image: my-app:2.1
+          command: ["python", "manage.py", "migrate"]
+          envFrom:
+            - secretRef:
+                name: db-credentials
+      restartPolicy: Never
+  backoffLimit: 3
+```
+
+## Microservices vs Monolith
+
+### When to Start with a Monolith
+
+```mermaid
+graph TB
+    MONO[Modular Monolith] -->|"Team grows,<br/>clear boundaries emerge"| EXTRACT[Extract Services]
+    EXTRACT --> MS[Microservices]
+
+    style MONO fill:#9f9,stroke:#333
+    style EXTRACT fill:#ff9,stroke:#333
+    style MS fill:#9cf,stroke:#333
+```
+
+**Start monolith when:** Small team (< 10), unclear domain boundaries, rapid prototyping, speed to market.
+
+**Move to microservices when:** Independent team ownership, different scaling needs, polyglot technology requirements, clear bounded contexts.
+
+### The Strangler Fig Pattern
+
+Incrementally replace a monolith by building new functionality as services and routing traffic to them.
+
+```mermaid
+graph TB
+    LB[Load Balancer / API Gateway]
+    LB -->|"/api/orders"| NEW[New Order Service]
+    LB -->|"/api/users"| MONO[Monolith]
+    LB -->|"/api/products"| MONO
+    LB -->|"/api/payments"| NEW2[New Payment Service]
+
+    NEW --> DB1[(Orders DB)]
+    NEW2 --> DB2[(Payments DB)]
+    MONO --> DB3[(Monolith DB)]
+
+    style NEW fill:#9f9
+    style NEW2 fill:#9f9
+    style MONO fill:#f99
+```
+
+```yaml
+# Nginx routing — gradual migration
+upstream monolith {
+    server monolith:8080;
+}
+
+upstream order_service {
+    server order-service:8080;
+}
+
+upstream payment_service {
+    server payment-service:8080;
+}
+
+server {
+    listen 80;
+
+    # Migrated endpoints
+    location /api/orders {
+        proxy_pass http://order_service;
+    }
+
+    location /api/payments {
+        proxy_pass http://payment_service;
+    }
+
+    # Everything else stays on the monolith
+    location / {
+        proxy_pass http://monolith;
+    }
+}
+```
+
+**Migration steps:**
+1. Identify a bounded context with clear API boundaries
+2. Build the new service alongside the monolith
+3. Route traffic to the new service (via API gateway)
+4. Migrate data from the monolith database
+5. Remove the old code from the monolith
+6. Repeat for the next bounded context
+
+## Hands-On Exercise: Twelve-Factor Audit
+
+### Exercise: Audit an Application
+
+```bash
+# Clone any sample app and audit it against the 12 factors
+# Use this checklist:
+
+cat <<'EOF'
+TWELVE-FACTOR AUDIT CHECKLIST
+==============================
+[ ] 1. Codebase:     Single repo? Same code deployed everywhere?
+[ ] 2. Dependencies:  Lock file present? No system-level deps assumed?
+[ ] 3. Config:        All config via env vars? No hardcoded URLs/keys?
+[ ] 4. Backing Svc:   DB/cache/queue swappable without code changes?
+[ ] 5. Build/Release:  Strict separation? Immutable artifacts?
+[ ] 6. Processes:      Stateless? No in-memory sessions or file uploads?
+[ ] 7. Port Binding:   Self-contained HTTP server?
+[ ] 8. Concurrency:    Can scale horizontally? Process-type diversity?
+[ ] 9. Disposability:  Fast startup? Graceful shutdown handlers?
+[ ] 10. Dev/Prod:      Same backing services locally and in prod?
+[ ] 11. Logs:          Stdout only? No file-based logging?
+[ ] 12. Admin:         Migrations as one-off processes? Same codebase?
+EOF
+```
+
+## Key Takeaways
+
+- The twelve factors are **principles, not rules** — apply judgment based on context
+- **Stateless processes** and **config via environment** are the most commonly violated factors
+- Start with a **modular monolith** — extract microservices only when you have clear reasons
+- The **strangler fig pattern** enables incremental migration without big-bang rewrites
+- Cloud-native apps are **portable** (run anywhere), **elastic** (scale on demand), and **resilient** (handle failures gracefully)
+- These principles align naturally with **containers and Kubernetes**
+
+## External Resources
+
+- [The Twelve-Factor App](https://12factor.net/)
+- [Beyond the Twelve-Factor App — Pivotal](https://www.oreilly.com/library/view/beyond-the-twelve-factor/9781492042631/)
+- [Microservices Patterns — Chris Richardson](https://microservices.io/patterns/)
+- [MonolithFirst — Martin Fowler](https://martinfowler.com/bliki/MonolithFirst.html)
+- [Strangler Fig Application — Martin Fowler](https://martinfowler.com/bliki/StranglerFigApplication.html)

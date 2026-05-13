@@ -1,0 +1,70 @@
+{
+  "module_slug": "fundamentals",
+  "questions": [
+    {
+      "id": "q1",
+      "text": "What is the primary advantage of Vite over Create React App for development?",
+      "options": [
+        "Vite supports more JavaScript frameworks",
+        "Vite serves source files as native ES modules, making dev server startup nearly instant",
+        "Vite produces smaller production bundles",
+        "Vite doesn't require Node.js"
+      ],
+      "correct": "Vite serves source files as native ES modules, making dev server startup nearly instant",
+      "explanation": "Vite's key innovation is using native ES modules during development. Instead of bundling the entire app before serving (like Webpack/CRA), Vite transforms files on-demand as the browser requests them, resulting in sub-second server starts regardless of app size.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q2",
+      "text": "Why should you avoid using array indices as keys when rendering lists in React?",
+      "options": [
+        "Array indices are not unique",
+        "React doesn't accept numbers as keys",
+        "Index-based keys cause incorrect component reuse when items are reordered, added, or removed",
+        "Using indices is slower than string keys"
+      ],
+      "correct": "Index-based keys cause incorrect component reuse when items are reordered, added, or removed",
+      "explanation": "React uses keys to identify which items changed. If you use indices and insert an item at the beginning, every subsequent item's key changes, causing React to destroy and recreate all those components instead of just adding one. This leads to bugs with component state and unnecessary DOM operations.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q3",
+      "text": "What happens if you provide no dependency array to useEffect?",
+      "options": [
+        "The effect never runs",
+        "The effect runs only on mount",
+        "The effect runs after every render",
+        "The effect runs once and then is garbage collected"
+      ],
+      "correct": "The effect runs after every render",
+      "explanation": "With no dependency array, useEffect runs after every single render (including re-renders). With an empty array [], it runs once after initial render. With [a, b], it runs when a or b changes. Omitting the array is usually a bug that can cause performance issues or infinite loops.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q4",
+      "text": "When should you use the functional updater form of useState (e.g., setCount(prev => prev + 1))?",
+      "options": [
+        "Always — it's the recommended form for all state updates",
+        "When the new state depends on the previous state value",
+        "Only when using useState inside useEffect",
+        "Only for number state variables"
+      ],
+      "correct": "When the new state depends on the previous state value",
+      "explanation": "The functional updater ensures you're working with the latest state value. This matters when multiple updates happen in quick succession (like rapid clicks) or when the update is inside a stale closure (like a setTimeout). Direct updates like setCount(count + 1) may use a stale 'count' value.",
+      "type": "single_choice"
+    },
+    {
+      "id": "q5",
+      "text": "What is a custom hook in React?",
+      "options": [
+        "A class component that extends React.Hook",
+        "A special built-in React function for advanced state management",
+        "A regular JavaScript function that starts with 'use' and calls other hooks to encapsulate reusable stateful logic",
+        "A third-party library for adding new hooks to React"
+      ],
+      "correct": "A regular JavaScript function that starts with 'use' and calls other hooks to encapsulate reusable stateful logic",
+      "explanation": "Custom hooks are just functions whose names start with 'use'. They can call other hooks (useState, useEffect, etc.) and return whatever values are useful. They're the primary mechanism for extracting and sharing stateful logic between components without changing the component hierarchy.",
+      "type": "single_choice"
+    }
+  ]
+}

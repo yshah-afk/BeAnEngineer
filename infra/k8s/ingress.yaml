@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mastery-hub-ingress
+  namespace: mastery-hub
+  labels:
+    app.kubernetes.io/part-of: mastery-hub
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    # TLS — uncomment and configure when using cert-manager
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  # tls:
+  #   - hosts:
+  #       - mastery-hub.local
+  #     secretName: mastery-hub-tls
+  rules:
+    - host: mastery-hub.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

@@ -1,0 +1,405 @@
+---
+title: "Advanced Dynamic Programming"
+slug: "advanced-dp"
+track: "dsa"
+module: "dynamic-programming"
+difficulty: "Advanced"
+estimatedMinutes: 55
+prerequisites: ["classic-dp-patterns"]
+---
+
+## Learning Objectives
+
+- Apply bitmask DP to problems involving subsets of elements
+- Understand digit DP for counting numbers with specific digit properties
+- Implement DP on trees for path and subtree optimization problems
+- Use interval DP for range-based optimization (burst balloons, palindrome partitioning)
+- Apply space optimization techniques to 2D DP problems
+
+## Prerequisites
+
+- Classic DP patterns (knapsack, LCS, LIS, coin change)
+- Bit manipulation basics (AND, OR, XOR, bit shifts)
+- Binary tree traversals
+- Matrix chain multiplication concept (interval DP)
+
+## Bitmask DP
+
+When the state involves selecting from a **small set** (n ≤ 20), represent the subset as a bitmask. Bit i is 1 if element i is selected, 0 otherwise.
+
+### Traveling Salesman Problem (TSP)
+
+Visit all n cities exactly once and return to start, minimizing total distance.
+
+**State**: `dp[mask][i]` = min cost to visit cities in `mask` ending at city `i`
+
+```python
+def tsp(dist):
+    n = len(dist)
+    ALL = (1 << n) - 1
+    dp = [[float('inf')] * n for _ in range(1 << n)]
+    dp[1][0] = 0  # start at city 0
+
+    for mask in range(1 << n):
+        for u in range(n):
+            if dp[mask][u] == float('inf'):
+                continue
+            if not (mask & (1 << u)):
+                continue
+            for v in range(n):
+                if mask & (1 << v):
+                    continue  # already visited
+                new_mask = mask | (1 << v)
+                dp[new_mask][v] = min(dp[new_mask][v],
+                                      dp[mask][u] + dist[u][v])
+
+    return min(dp[ALL][i] + dist[i][0] for i in range(n))
+```
+
+**Time**: O(2ⁿ × n²). **Space**: O(2ⁿ × n). Feasible for n ≤ 20.
+
+### Assignment Problem
+
+Assign n workers to n tasks, minimizing total cost. Each worker does exactly one task.
+
+```python
+def min_cost_assignment(cost):
+    n = len(cost)
+    dp = [float('inf')] * (1 << n)
+    dp[0] = 0
+
+    for mask in range(1 << n):
+        worker = bin(mask).count('1')
+        if worker >= n:
+            continue
+        for task in range(n):
+            if mask & (1 << task):
+                continue
+            new_mask = mask | (1 << task)
+            dp[new_mask] = min(dp[new_mask],
+                               dp[mask] + cost[worker][task])
+
+    return dp[(1 << n) - 1]
+```
+
+### Common Bitmask Operations
+
+```python
+# Check if bit i is set
+is_set = (mask >> i) & 1
+
+# Set bit i
+new_mask = mask | (1 << i)
+
+# Clear bit i
+new_mask = mask & ~(1 << i)
+
+# Iterate over all subsets of mask
+submask = mask
+while submask > 0:
+    # process submask
+    submask = (submask - 1) & mask
+
+# Count set bits
+count = bin(mask).count('1')
+```
+
+## Digit DP
+
+Digit DP counts numbers in a range [L, R] satisfying some digit-based property. The idea: process digits from most significant to least, tracking whether we're still "tight" (bounded by the limit) and the relevant property state.
+
+### Count Numbers with Non-Repeating Digits (0 to N)
+
+```python
+from functools import cache
+
+def count_unique_digits(n):
+    digits = list(map(int, str(n)))
+
+    @cache
+    def dp(pos, mask, tight, started):
+        """
+        pos: current digit position
+        mask: bitmask of digits used
+        tight: are we still bounded by n?
+        started: have we placed a non-zero digit yet?
+        """
+        if pos == len(digits):
+            return 1 if started else 0
+
+        limit = digits[pos] if tight else 9
+        count = 0
+
+        for d in range(0, limit + 1):
+            if d == 0 and not started:
+                count += dp(pos + 1, mask, tight and d == limit, False)
+            elif not (mask & (1 << d)):
+                count += dp(pos + 1, mask | (1 << d),
+                           tight and d == limit, True)
+
+        return count
+
+    return dp(0, 0, True, False)
+```
+
+### Template for Range [L, R]
+
+```python
+def count_in_range(L, R, property_fn):
+    return count_up_to(R, property_fn) - count_up_to(L - 1, property_fn)
+```
+
+## DP on Trees
+
+Tree DP computes optimal values by processing subtrees bottom-up. The state is typically rooted at each node.
+
+### Maximum Independent Set on a Tree
+
+Select the maximum number of nodes such that no two selected nodes are adjacent.
+
+```python
+def max_independent_set(adj, root=0):
+    n = len(adj)
+    dp = [[0, 0] for _ in range(n)]
+    # dp[v][0] = max set size if v is NOT included
+    # dp[v][1] = max set size if v IS included
+
+    visited = [False] * n
+
+    def dfs(v, parent):
+        visited[v] = True
+        dp[v][1] = 1
+
+        for u in adj[v]:
+            if u != parent and not visited[u]:
+                dfs(u, v)
+                dp[v][0] += max(dp[u][0], dp[u][1])
+                dp[v][1] += dp[u][0]  # children can't be included
+
+    dfs(root, -1)
+    return max(dp[root][0], dp[root][1])
+```
+
+**Time**: O(n). **Space**: O(n).
+
+### Tree Diameter via DP
+
+```python
+def tree_diameter(adj):
+    n = len(adj)
+    dp = [0] * n  # longest path starting at node going down
+    diameter = 0
+
+    def dfs(v, parent):
+        nonlocal diameter
+        max1 = max2 = 0
+        for u in adj[v]:
+            if u != parent:
+                dfs(u, v)
+                d = dp[u] + 1
+                if d > max1:
+                    max2 = max1
+                    max1 = d
+                elif d > max2:
+                    max2 = d
+        dp[v] = max1
+        diameter = max(diameter, max1 + max2)
+
+    dfs(0, -1)
+    return diameter
+```
+
+### House Robber III (LeetCode 337) — DP on Binary Tree
+
+```python
+def rob_tree(root):
+    def dfs(node):
+        if not node:
+            return (0, 0)  # (not_robbed, robbed)
+        left = dfs(node.left)
+        right = dfs(node.right)
+
+        not_robbed = max(left) + max(right)
+        robbed = node.val + left[0] + right[0]
+
+        return (not_robbed, robbed)
+
+    return max(dfs(root))
+```
+
+## Interval DP
+
+Interval DP optimizes over contiguous ranges. **State**: `dp[i][j]` = optimal value for the range [i, j].
+
+**Fill order**: Process shorter intervals before longer ones (length from 1 to n).
+
+### Burst Balloons (LeetCode 312)
+
+Given n balloons with values, burst them to maximize the sum of `nums[left] * nums[i] * nums[right]` for each burst.
+
+```python
+def max_coins(nums):
+    nums = [1] + nums + [1]
+    n = len(nums)
+    dp = [[0] * n for _ in range(n)]
+
+    for length in range(2, n):
+        for left in range(n - length):
+            right = left + length
+            for k in range(left + 1, right):
+                dp[left][right] = max(
+                    dp[left][right],
+                    dp[left][k] + dp[k][right] +
+                    nums[left] * nums[k] * nums[right]
+                )
+
+    return dp[0][n - 1]
+```
+
+**Time**: O(n³). **Space**: O(n²).
+
+The key insight: instead of thinking about which balloon to burst first, think about which balloon is burst **last** in each range.
+
+### Palindrome Partitioning II (LeetCode 132)
+
+Find minimum cuts to partition a string into palindromes.
+
+```python
+def min_cut(s):
+    n = len(s)
+    is_pal = [[False] * n for _ in range(n)]
+
+    # Precompute palindrome table
+    for length in range(1, n + 1):
+        for i in range(n - length + 1):
+            j = i + length - 1
+            if s[i] == s[j] and (length <= 2 or is_pal[i + 1][j - 1]):
+                is_pal[i][j] = True
+
+    dp = list(range(n))  # dp[i] = min cuts for s[0..i]
+
+    for i in range(1, n):
+        if is_pal[0][i]:
+            dp[i] = 0
+            continue
+        for j in range(1, i + 1):
+            if is_pal[j][i]:
+                dp[i] = min(dp[i], dp[j - 1] + 1)
+
+    return dp[n - 1]
+```
+
+## Space Optimization Techniques
+
+### Rolling Array for 2D DP
+
+When `dp[i]` only depends on `dp[i-1]`, keep only two rows.
+
+```python
+def lcs_space_optimized(text1, text2):
+    m, n = len(text1), len(text2)
+    if m < n:
+        text1, text2 = text2, text1
+        m, n = n, m
+    prev = [0] * (n + 1)
+    curr = [0] * (n + 1)
+
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if text1[i - 1] == text2[j - 1]:
+                curr[j] = prev[j - 1] + 1
+            else:
+                curr[j] = max(prev[j], curr[j - 1])
+        prev, curr = curr, [0] * (n + 1)
+
+    return prev[n]
+```
+
+### Single Row with Careful Update Order
+
+For 0/1 knapsack, iterate right-to-left to avoid using updated values from the current row.
+
+For unbounded knapsack, iterate left-to-right because reusing current-row values is desired.
+
+## Hands-On Exercises
+
+### Exercise 1: Minimum XOR Sum of Two Arrays (LeetCode 1879)
+
+```python
+def minimum_xor_sum(nums1, nums2):
+    n = len(nums1)
+    dp = [float('inf')] * (1 << n)
+    dp[0] = 0
+
+    for mask in range(1 << n):
+        i = bin(mask).count('1')
+        if i >= n:
+            continue
+        for j in range(n):
+            if mask & (1 << j):
+                continue
+            dp[mask | (1 << j)] = min(
+                dp[mask | (1 << j)],
+                dp[mask] + (nums1[i] ^ nums2[j])
+            )
+
+    return dp[(1 << n) - 1]
+```
+
+### Exercise 2: Binary Tree Maximum Path Sum (LeetCode 124)
+
+```python
+def max_path_sum(root):
+    result = float('-inf')
+
+    def dfs(node):
+        nonlocal result
+        if not node:
+            return 0
+        left = max(0, dfs(node.left))
+        right = max(0, dfs(node.right))
+        result = max(result, left + right + node.val)
+        return node.val + max(left, right)
+
+    dfs(root)
+    return result
+```
+
+### Exercise 3: Strange Printer (LeetCode 664)
+
+```python
+def strange_printer(s):
+    s = "".join(c for c, _ in __import__('itertools').groupby(s))
+    n = len(s)
+    dp = [[0] * n for _ in range(n)]
+
+    for i in range(n):
+        dp[i][i] = 1
+
+    for length in range(2, n + 1):
+        for i in range(n - length + 1):
+            j = i + length - 1
+            dp[i][j] = dp[i + 1][j] + 1
+            for k in range(i + 1, j + 1):
+                if s[k] == s[i]:
+                    dp[i][j] = min(dp[i][j], dp[i + 1][k] + dp[k + 1][j] if k + 1 <= j else dp[i + 1][k])
+
+    return dp[0][n - 1] if n > 0 else 0
+```
+
+## Key Takeaways
+
+- **Bitmask DP** handles subset problems where n ≤ 20; represent subsets as integers and iterate over masks
+- **Digit DP** counts numbers with digit properties; track tightness and the relevant digit state
+- **Tree DP** processes subtrees bottom-up; each node's DP depends on its children's DP values
+- **Interval DP** optimizes over ranges [i, j]; always process shorter intervals first
+- **Space optimization** reduces 2D DP to 1D when only the previous row matters; update order depends on whether you need old or new values
+- These advanced patterns appear in competitive programming and hard interview problems — mastering the templates is key
+
+## External Resources
+
+- [CP Algorithms: Bitmask DP](https://cp-algorithms.com/algebra/all-submasks.html)
+- [Digit DP Tutorial — Codeforces](https://codeforces.com/blog/entry/77096)
+- [AtCoder DP Contest](https://atcoder.jp/contests/dp)
+- [Errichto: Advanced DP](https://www.youtube.com/watch?v=FAQxdm0bTaw)
+- [USACO Guide: Tree DP](https://usaco.guide/gold/dp-trees)

@@ -1,0 +1,382 @@
+---
+title: "Design a Chat System"
+slug: "design-chat-system"
+track: "system-design"
+module: "real-world-designs"
+difficulty: "Advanced"
+estimatedMinutes: 50
+prerequisites: ["message-queues", "data-partitioning", "load-balancers"]
+---
+
+## Learning Objectives
+
+- Design a real-time chat system supporting 1-on-1 and group messaging
+- Implement WebSocket-based communication with connection management
+- Solve message ordering, delivery guarantees, and offline message handling
+- Design presence (online/offline status) at scale
+- Evaluate end-to-end encryption approaches and their architectural impact
+
+## Prerequisites
+
+- Understanding of WebSockets and HTTP long-polling
+- Familiarity with message queues and pub/sub patterns
+- Knowledge of database partitioning and replication
+
+## Requirements
+
+### Functional Requirements
+
+1. 1-on-1 messaging (real-time)
+2. Group messaging (up to 500 members)
+3. Online/offline presence indicators
+4. Message delivery receipts (sent, delivered, read)
+5. Message history and search
+6. Media sharing (images, files)
+
+### Non-Functional Requirements
+
+- **Real-time delivery**: <100ms for online users
+- **Message ordering**: Messages appear in the order they were sent
+- **Reliability**: No message loss, exactly-once delivery to each recipient
+- **Scale**: 500M DAU, 40B messages/day
+
+### Capacity Estimation
+
+```
+Users: 500M DAU
+Messages: 40B/day = ~460K messages/sec
+  Average message size: 200 bytes (text) + metadata = 500 bytes
+  Storage: 40B × 500 bytes = 20 TB/day = 7.3 PB/year
+
+Concurrent WebSocket connections:
+  500M DAU, ~30% online at peak = 150M concurrent connections
+  Each connection: ~10KB memory
+  150M × 10KB = 1.5 TB memory for connection state
+
+Bandwidth:
+  460K msg/sec × 500 bytes = 230 MB/sec = ~2 Gbps
+```
+
+## High-Level Architecture
+
+```mermaid
+graph TD
+    subgraph "Clients"
+        C1["User A<br/>(Mobile)"]
+        C2["User B<br/>(Web)"]
+    end
+
+    subgraph "Edge Layer"
+        LB["Load Balancer<br/>(L4 for WebSocket)"]
+        WS1["Chat Server 1<br/>(WebSocket)"]
+        WS2["Chat Server 2<br/>(WebSocket)"]
+    end
+
+    subgraph "Service Layer"
+        MSG["Message Service"]
+        PRES["Presence Service"]
+        GROUP["Group Service"]
+        PUSH["Push Notification<br/>Service"]
+    end
+
+    subgraph "Data Layer"
+        MQ["Message Queue<br/>(Kafka)"]
+        Cache["Redis Cluster<br/>(presence, sessions)"]
+        DB[("Message Store<br/>(Cassandra)")]
+        S3["Object Storage<br/>(media files)"]
+    end
+
+    C1 -->|"WebSocket"| LB
+    C2 -->|"WebSocket"| LB
+    LB --> WS1
+    LB --> WS2
+    WS1 --> MSG
+    WS2 --> MSG
+    MSG --> MQ
+    MSG --> DB
+    WS1 --> PRES
+    PRES --> Cache
+    MSG --> PUSH
+```
+
+## Real-Time Communication
+
+### WebSocket Connection Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant LB as Load Balancer
+    participant WS as Chat Server
+    participant Redis
+
+    Client->>LB: HTTP Upgrade: websocket
+    LB->>WS: Forward (sticky by user_id)
+    WS->>Client: 101 Switching Protocols
+
+    WS->>Redis: SET user:123:server = ws-server-5
+    WS->>Redis: SET user:123:status = online
+    Note over WS, Redis: Track which server holds this connection
+
+    loop Heartbeat (every 30s)
+        WS->>Client: PING
+        Client->>WS: PONG
+    end
+
+    Note over Client: User closes app
+    Client->>WS: Connection closed
+    WS->>Redis: SET user:123:status = offline
+    WS->>Redis: DEL user:123:server
+```
+
+### Why WebSockets Over HTTP?
+
+| Approach | Latency | Server Resources | Best For |
+|----------|---------|-----------------|----------|
+| **Short polling** | 1-5s delay | Very high (constant requests) | Legacy systems |
+| **Long polling** | ~instant | High (connections held open) | Fallback |
+| **WebSocket** | Instant | Low (persistent, bidirectional) | Chat, gaming |
+| **SSE** | Instant | Medium (server→client only) | Notifications, feeds |
+
+## Message Flow
+
+### 1-on-1 Message Delivery
+
+```mermaid
+sequenceDiagram
+    participant A as User A
+    participant WS_A as Chat Server A
+    participant MSG as Message Service
+    participant DB as Cassandra
+    participant WS_B as Chat Server B
+    participant B as User B
+
+    A->>WS_A: Send message to User B
+    WS_A->>MSG: Store message
+
+    MSG->>DB: Save message (chat_id, msg_id, content, timestamp)
+    MSG->>MSG: Look up User B's server
+
+    alt User B is online
+        MSG->>WS_B: Deliver message
+        WS_B->>B: Push message via WebSocket
+        B-->>WS_B: Delivery ACK
+        WS_B-->>MSG: Mark as delivered
+    end
+
+    alt User B is offline
+        MSG->>DB: Store in undelivered queue
+        MSG->>PUSH: Send push notification
+    end
+
+    MSG-->>WS_A: Send ACK to User A
+    WS_A-->>A: ✓ Sent
+```
+
+### Group Message Delivery
+
+For a group with 500 members, you can't fan out to 500 WebSocket connections synchronously:
+
+```mermaid
+graph TD
+    Sender["Sender"] --> MSG["Message Service"]
+    MSG --> DB["Store message<br/>(group_id, msg_id)"]
+    MSG --> FanOut["Fan-Out Service"]
+
+    FanOut --> Q1["Server 1 queue<br/>(members on server 1)"]
+    FanOut --> Q2["Server 2 queue<br/>(members on server 2)"]
+    FanOut --> Q3["Server 3 queue<br/>(members on server 3)"]
+
+    Q1 --> WS1["Chat Server 1<br/>Push to 50 members"]
+    Q2 --> WS2["Chat Server 2<br/>Push to 30 members"]
+    Q3 --> WS3["Chat Server 3<br/>Push to 20 members"]
+```
+
+**Optimization**: Group messages by the chat server they need to go to. Instead of 500 individual deliveries, batch by server (e.g., 10 servers × 50 members each).
+
+## Message Storage
+
+### Schema Design (Cassandra)
+
+```sql
+-- Messages partitioned by chat_id, ordered by message_id (time-based)
+CREATE TABLE messages (
+    chat_id     UUID,
+    message_id  TIMEUUID,
+    sender_id   UUID,
+    content     TEXT,
+    content_type TEXT,  -- 'text', 'image', 'file'
+    media_url   TEXT,
+    created_at  TIMESTAMP,
+    PRIMARY KEY (chat_id, message_id)
+) WITH CLUSTERING ORDER BY (message_id DESC);
+
+-- User's chat list (recent conversations)
+CREATE TABLE user_chats (
+    user_id       UUID,
+    last_activity TIMESTAMP,
+    chat_id       UUID,
+    chat_type     TEXT,  -- '1on1', 'group'
+    last_message  TEXT,
+    unread_count  INT,
+    PRIMARY KEY (user_id, last_activity, chat_id)
+) WITH CLUSTERING ORDER BY (last_activity DESC);
+```
+
+**Why Cassandra?**: Write-heavy workload (460K messages/sec), partition by `chat_id` keeps conversation data together, time-ordered within partition, horizontal scaling.
+
+## Message Ordering
+
+### The Ordering Challenge
+
+```
+User A sends "Hello" at t=1000 (server clock: 1000)
+User B sends "Hi" at t=999 (server clock: 1001, B's phone clock is behind)
+
+Which came first? Server clocks may disagree across servers.
+```
+
+### Solutions
+
+1. **Server-assigned timestamps**: The message service assigns a timestamp when it receives the message. Consistent but doesn't reflect "true" send time.
+
+2. **Lamport timestamps**: Logical clocks that ensure causal ordering. If A sends after seeing B's message, A's timestamp is guaranteed to be higher.
+
+3. **Per-conversation sequence numbers**: Each conversation has a monotonically increasing sequence number. The message service assigns the next number atomically:
+
+```
+Chat #456:
+  seq=1: Alice: "Hello"
+  seq=2: Bob: "Hi there"
+  seq=3: Alice: "How are you?"
+
+Client-side: display messages ordered by sequence number
+```
+
+## Presence System
+
+### Presence at Scale
+
+Tracking online/offline status for 500M users requires careful design:
+
+```mermaid
+graph TD
+    subgraph "Presence Architecture"
+        WS["WebSocket Server"]
+        Redis["Redis<br/>(presence state)"]
+        PubSub["Redis Pub/Sub<br/>(presence events)"]
+    end
+
+    WS -->|"Heartbeat every 30s"| Redis
+    WS -->|"Status change"| PubSub
+    PubSub --> WS2["Other WS Servers<br/>(notify friends)"]
+```
+
+### Fan-Out Problem
+
+If a user with 1,000 friends comes online, do you notify all 1,000? That's expensive at scale.
+
+**WhatsApp's approach**: Only show presence for the currently open chat. Don't broadcast "online" to all contacts — only to the person you're actively chatting with.
+
+**Lazy presence**: When User A opens a chat with User B, query User B's presence. Don't push presence updates to all contacts proactively.
+
+```
+Proactive: User comes online → notify 500 friends = 500 messages
+Lazy: User opens chat with friend → query 1 presence = 1 message
+```
+
+## End-to-End Encryption (E2EE)
+
+### Signal Protocol (used by WhatsApp, Signal)
+
+```mermaid
+sequenceDiagram
+    participant A as Alice
+    participant Server
+    participant B as Bob
+
+    Note over A,B: Key Exchange (X3DH)
+    A->>Server: Fetch Bob's pre-keys
+    Server-->>A: Bob's public pre-keys
+    A->>A: Generate shared secret
+
+    Note over A,B: Message Encryption
+    A->>A: Encrypt message with shared secret
+    A->>Server: Send encrypted message
+    Note over Server: Server CANNOT read the message
+    Server->>B: Forward encrypted message
+    B->>B: Decrypt with shared secret
+```
+
+### E2EE Implications for Architecture
+
+| Feature | Without E2EE | With E2EE |
+|---------|-------------|-----------|
+| Server-side search | Yes | No (can't read messages) |
+| Message backup | Server handles | Client must manage keys |
+| Spam detection | Content analysis | Metadata-only analysis |
+| Group messages | Simple fanout | Re-encrypt per recipient |
+| Push notification preview | Show message text | "New message" (generic) |
+
+## Delivery Receipts
+
+### Three Ticks System
+
+```mermaid
+graph LR
+    Sent["✓ Sent<br/>Server received message"]
+    Delivered["✓✓ Delivered<br/>Recipient's device received"]
+    Read["✓✓ Read<br/>Recipient opened the chat"]
+
+    Sent --> Delivered --> Read
+
+    style Sent fill:#cccccc
+    style Delivered fill:#cccccc
+    style Read fill:#4CAF50,color:white
+```
+
+Implementation:
+1. **Sent**: Message service ACKs to sender
+2. **Delivered**: Recipient's client sends delivery ACK back through WebSocket
+3. **Read**: Recipient opens the chat → client sends read receipt
+
+## Offline Message Handling
+
+```mermaid
+graph TD
+    MSG["Message arrives<br/>for offline user"] --> Store["Store in undelivered<br/>messages queue"]
+    Store --> Push["Send push notification<br/>(APNS / FCM)"]
+
+    User["User comes online"] --> Sync["Fetch undelivered<br/>messages (paginated)"]
+    Sync --> Deliver["Deliver messages<br/>in order"]
+    Deliver --> Clean["Remove from<br/>undelivered queue"]
+```
+
+## Interview Approach
+
+1. **Start with requirements**: 1-on-1? Group? Scale? E2EE?
+2. **Choose communication protocol**: WebSocket for real-time
+3. **Design message flow**: Send → store → route → deliver
+4. **Handle offline users**: Persistent queue + push notifications
+5. **Solve ordering**: Per-conversation sequence numbers
+6. **Design presence**: Lazy over proactive for scale
+7. **Discuss trade-offs**: E2EE implications, group message fan-out
+
+> **Pro tip**: Draw the message flow for both online and offline recipients. Interviewers want to see you handle both cases.
+
+## Key Takeaways
+
+1. **WebSocket is the right choice**: Persistent, bidirectional, low-latency. Use L4 load balancing with sticky sessions.
+2. **Partition messages by conversation**: Each chat's messages stay together. Cassandra with `chat_id` partition key.
+3. **Lazy presence scales better**: Only query presence for active conversations, don't broadcast to all contacts.
+4. **Sequence numbers ensure ordering**: Per-conversation counters are simpler and more reliable than synchronized clocks.
+5. **Offline handling is critical**: Store-and-forward with push notifications for offline users.
+6. **E2EE changes everything**: Server can't search, filter, or preview encrypted messages.
+
+## External Resources
+
+- [WhatsApp System Architecture](https://www.youtube.com/watch?v=vvhC64hQZMk)
+- [Signal Protocol Specification](https://signal.org/docs/)
+- [Facebook Messenger Architecture](https://engineering.fb.com/2014/10/09/production-engineering/building-mobile-first-infrastructure-for-messenger/)
+- [Discord Architecture (blog)](https://discord.com/blog/how-discord-stores-trillions-of-messages)
+- [Designing Data-Intensive Applications — Ch. 11](https://dataintensive.net/)

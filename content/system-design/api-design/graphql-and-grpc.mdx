@@ -1,0 +1,398 @@
+---
+title: "GraphQL & gRPC"
+slug: "graphql-and-grpc"
+track: "system-design"
+module: "api-design"
+difficulty: "Intermediate"
+estimatedMinutes: 45
+prerequisites: ["rest-api-design"]
+---
+
+## Learning Objectives
+
+- Design GraphQL schemas with types, queries, mutations, and subscriptions
+- Identify and resolve the N+1 query problem with DataLoader batching
+- Compare gRPC and REST for service-to-service communication
+- Implement API gateways that aggregate and route across multiple protocols
+- Choose the right API protocol based on client type, use case, and team capabilities
+
+## Prerequisites
+
+- Understanding of REST API design principles
+- Familiarity with client-server communication patterns
+- Basic knowledge of serialization formats (JSON, binary)
+
+## GraphQL
+
+### What Problem Does GraphQL Solve?
+
+REST APIs often suffer from **over-fetching** and **under-fetching**:
+
+```mermaid
+graph TD
+    subgraph "REST: 3 requests, over-fetching"
+        R1["GET /users/123<br/>Returns 30 fields<br/>(you need 3)"]
+        R2["GET /users/123/posts<br/>Returns all posts<br/>(you need titles)"]
+        R3["GET /users/123/followers?count=true<br/>Returns count<br/>(separate endpoint)"]
+    end
+
+    subgraph "GraphQL: 1 request, exact data"
+        GQ["POST /graphql<br/>query { user(id: 123) {<br/>  name, avatar,<br/>  posts { title },<br/>  followersCount<br/>}}"]
+    end
+```
+
+GraphQL lets the **client specify exactly what data it needs** in a single request.
+
+### Schema Definition
+
+```graphql
+type User {
+  id: ID!
+  name: String!
+  email: String!
+  avatar: String
+  posts(first: Int, after: String): PostConnection!
+  followers: [User!]!
+  followersCount: Int!
+  createdAt: DateTime!
+}
+
+type Post {
+  id: ID!
+  title: String!
+  content: String!
+  author: User!
+  comments: [Comment!]!
+  likes: Int!
+  publishedAt: DateTime
+}
+
+type PostConnection {
+  edges: [PostEdge!]!
+  pageInfo: PageInfo!
+}
+
+type PostEdge {
+  node: Post!
+  cursor: String!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  endCursor: String
+}
+
+type Query {
+  user(id: ID!): User
+  users(first: Int, after: String): UserConnection!
+  post(id: ID!): Post
+  feed(userId: ID!, first: Int, after: String): PostConnection!
+}
+
+type Mutation {
+  createPost(input: CreatePostInput!): Post!
+  updateUser(id: ID!, input: UpdateUserInput!): User!
+  deletePost(id: ID!): Boolean!
+}
+
+type Subscription {
+  postCreated(userId: ID!): Post!
+  commentAdded(postId: ID!): Comment!
+}
+```
+
+### Query Examples
+
+```graphql
+# Client requests exactly what it needs
+query {
+  user(id: "123") {
+    name
+    avatar
+    posts(first: 5) {
+      edges {
+        node {
+          title
+          likes
+          publishedAt
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+    followersCount
+  }
+}
+```
+
+Response contains **only the requested fields**, reducing payload size and network usage.
+
+### The N+1 Problem
+
+The most common GraphQL performance pitfall:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant GQL as GraphQL Server
+    participant DB
+
+    Client->>GQL: query { posts(first: 10) { title, author { name } } }
+
+    GQL->>DB: SELECT * FROM posts LIMIT 10  (1 query)
+
+    loop For each of 10 posts
+        GQL->>DB: SELECT * FROM users WHERE id = ? (10 queries!)
+    end
+
+    Note over GQL, DB: N+1 problem: 1 + 10 = 11 queries
+```
+
+### DataLoader Solution
+
+**DataLoader** batches and caches database lookups within a single request:
+
+```javascript
+const userLoader = new DataLoader(async (userIds) => {
+  const users = await db.query(
+    'SELECT * FROM users WHERE id IN (?)',
+    [userIds]
+  );
+  return userIds.map(id => users.find(u => u.id === id));
+});
+
+// Resolver
+const resolvers = {
+  Post: {
+    author: (post) => userLoader.load(post.authorId)
+  }
+};
+
+// Instead of 10 separate queries:
+// SELECT * FROM users WHERE id IN (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+// 1 batched query!
+```
+
+### GraphQL Trade-offs
+
+| Advantage | Disadvantage |
+|-----------|-------------|
+| No over/under-fetching | Complex server implementation |
+| Single endpoint | Difficult to cache (POST requests) |
+| Strongly typed schema | Unbounded query complexity |
+| Great developer experience | Learning curve |
+| Self-documenting (introspection) | File uploads are awkward |
+| Real-time with subscriptions | Rate limiting is harder (not per-endpoint) |
+
+### Query Complexity and Depth Limiting
+
+Prevent abuse with query analysis:
+
+```graphql
+# Malicious query: deeply nested, expensive
+query {
+  user(id: "123") {
+    followers {
+      followers {
+        followers {
+          followers { name }
+        }
+      }
+    }
+  }
+}
+```
+
+**Protections**:
+- **Depth limiting**: Max query depth of 5-10 levels
+- **Complexity scoring**: Assign costs to fields, reject queries exceeding budget
+- **Timeout**: Kill queries running longer than 10 seconds
+- **Persisted queries**: Only allow pre-approved query hashes in production
+
+## gRPC
+
+### What Is gRPC?
+
+gRPC is a high-performance RPC framework using **Protocol Buffers** (protobuf) for serialization and **HTTP/2** for transport:
+
+```mermaid
+graph LR
+    subgraph "REST"
+        RC["Client"] -->|"JSON over HTTP/1.1"| RS["Server"]
+    end
+
+    subgraph "gRPC"
+        GC["Client"] -->|"Protobuf over HTTP/2"| GS["Server"]
+    end
+```
+
+### Protocol Buffer Definition
+
+```protobuf
+syntax = "proto3";
+
+package userservice;
+
+service UserService {
+  rpc GetUser(GetUserRequest) returns (User);
+  rpc ListUsers(ListUsersRequest) returns (stream User);
+  rpc CreateUser(CreateUserRequest) returns (User);
+  rpc UpdateUser(UpdateUserRequest) returns (User);
+  rpc WatchUserUpdates(WatchRequest) returns (stream UserUpdate);
+}
+
+message User {
+  string id = 1;
+  string name = 2;
+  string email = 3;
+  int64 created_at = 4;
+}
+
+message GetUserRequest {
+  string id = 1;
+}
+
+message ListUsersRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message CreateUserRequest {
+  string name = 1;
+  string email = 2;
+}
+```
+
+### gRPC Communication Patterns
+
+```mermaid
+graph TD
+    subgraph "4 Communication Patterns"
+        U["Unary<br/>Request → Response<br/>(like REST)"]
+        SS["Server Streaming<br/>Request → Stream of responses<br/>(live updates)"]
+        CS["Client Streaming<br/>Stream of requests → Response<br/>(file upload)"]
+        BD["Bidirectional<br/>Stream ↔ Stream<br/>(chat, gaming)"]
+    end
+```
+
+### gRPC vs. REST
+
+| Feature | gRPC | REST |
+|---------|------|------|
+| **Serialization** | Protobuf (binary, ~10x smaller) | JSON (text, human-readable) |
+| **Transport** | HTTP/2 (multiplexed, binary) | HTTP/1.1 or HTTP/2 |
+| **Contract** | Strict (.proto files) | Loose (OpenAPI optional) |
+| **Code generation** | Built-in (all languages) | Requires additional tools |
+| **Streaming** | Native (4 patterns) | WebSocket (separate protocol) |
+| **Browser support** | Limited (needs gRPC-Web proxy) | Native |
+| **Latency** | ~1-5ms (internal) | ~5-50ms (internal) |
+| **Debugging** | Hard (binary, needs tools) | Easy (curl, browser) |
+
+### When to Use gRPC
+
+```mermaid
+graph TD
+    Q1{"Who's the client?"} -->|"Browser / Mobile"| REST["REST or GraphQL<br/>(browser-native)"]
+    Q1 -->|"Internal service"| Q2{"Need streaming?"}
+    Q2 -->|"Yes"| gRPC["gRPC"]
+    Q2 -->|"No"| Q3{"Need maximum<br/>performance?"}
+    Q3 -->|"Yes"| gRPC
+    Q3 -->|"No"| Q4{"Team familiar<br/>with gRPC?"}
+    Q4 -->|"Yes"| gRPC
+    Q4 -->|"No"| REST
+```
+
+## API Gateway Pattern
+
+### Aggregation Layer
+
+An API gateway sits between clients and microservices, providing a unified interface:
+
+```mermaid
+graph TD
+    Mobile["Mobile App"] --> GW["API Gateway"]
+    Web["Web App"] --> GW
+    Third["Third Party"] --> GW
+
+    GW -->|"REST"| US["User Service"]
+    GW -->|"gRPC"| OS["Order Service"]
+    GW -->|"GraphQL"| PS["Product Service"]
+    GW -->|"gRPC"| NS["Notification Service"]
+
+    subgraph "Gateway Responsibilities"
+        Auth["Authentication"]
+        Rate["Rate Limiting"]
+        Agg["Response Aggregation"]
+        Transform["Protocol Translation"]
+        Cache["Response Caching"]
+    end
+```
+
+### Backend for Frontend (BFF)
+
+Different clients need different API shapes:
+
+```mermaid
+graph TD
+    Mobile["Mobile App<br/>(limited bandwidth)"] --> BFF_M["Mobile BFF<br/>Minimal payloads<br/>Aggregated endpoints"]
+    Web["Web App<br/>(rich UI)"] --> BFF_W["Web BFF<br/>Detailed responses<br/>GraphQL"]
+    IoT["IoT Device<br/>(constrained)"] --> BFF_I["IoT BFF<br/>Binary protocol<br/>gRPC"]
+
+    BFF_M --> Services["Microservices"]
+    BFF_W --> Services
+    BFF_I --> Services
+```
+
+**Popular API Gateways**: Kong, AWS API Gateway, Envoy, NGINX, Apollo Router (for GraphQL federation).
+
+## Protocol Comparison
+
+```mermaid
+graph LR
+    subgraph "Choose Your Protocol"
+        direction TB
+        REST_box["REST<br/>• Public APIs<br/>• CRUD operations<br/>• Browser clients<br/>• Simple integrations"]
+        GQL_box["GraphQL<br/>• Complex frontend needs<br/>• Multiple client types<br/>• Nested data fetching<br/>• Real-time subscriptions"]
+        GRPC_box["gRPC<br/>• Service-to-service<br/>• High performance<br/>• Streaming<br/>• Polyglot microservices"]
+    end
+```
+
+### Real-World Combinations
+
+| Company | External API | Internal | Real-time |
+|---------|-------------|----------|-----------|
+| **Netflix** | REST | gRPC | gRPC streaming |
+| **GitHub** | REST + GraphQL | Internal APIs | WebSocket |
+| **Uber** | REST | gRPC (mostly) | gRPC streaming |
+| **Airbnb** | REST | Thrift → gRPC migration | WebSocket |
+| **Shopify** | REST + GraphQL | GraphQL + gRPC | WebSocket |
+
+## Interview Approach
+
+1. **Start with REST for external APIs**: It's the universal standard for public-facing APIs
+2. **Consider GraphQL for complex frontends**: When mobile/web clients need flexible data fetching
+3. **Use gRPC for internal services**: When you need performance and streaming between microservices
+4. **Add an API gateway**: For auth, rate limiting, and protocol translation
+5. **Address the N+1 problem**: If using GraphQL, mention DataLoader immediately
+
+> **Pro tip**: "We'll expose a REST API for external clients and use gRPC for internal service-to-service communication. An API gateway handles authentication and rate limiting at the edge."
+
+## Key Takeaways
+
+1. **REST is the default**: Universal, well-understood, works everywhere. Start here unless you have a specific reason not to.
+2. **GraphQL solves over/under-fetching**: Best for complex UIs with diverse data needs. Watch out for N+1 and complexity attacks.
+3. **gRPC is for internal services**: Binary protocol, streaming, code generation. Not for browser clients.
+4. **They're complementary**: Most companies use REST + gRPC, or REST + GraphQL, or all three.
+5. **API gateways unify protocols**: Translate between REST, gRPC, and GraphQL at the edge.
+6. **Schema-first design**: Whether it's OpenAPI, GraphQL SDL, or .proto files, define the contract before writing code.
+
+## External Resources
+
+- [GraphQL Official Documentation](https://graphql.org/learn/)
+- [gRPC Documentation](https://grpc.io/docs/)
+- [Protocol Buffers Language Guide](https://protobuf.dev/programming-guides/proto3/)
+- [Apollo GraphQL Federation](https://www.apollographql.com/docs/federation/)
+- [DataLoader: Generic Batching Utility](https://github.com/graphql/dataloader)
+- [Google API Design Guide (gRPC)](https://cloud.google.com/apis/design)
