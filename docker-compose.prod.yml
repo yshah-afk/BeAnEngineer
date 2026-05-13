@@ -1,0 +1,61 @@
+services:
+  mongodb:
+    image: mongo:7
+    restart: always
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: mastery_hub
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../infra/docker/backend.Dockerfile
+    restart: always
+    environment:
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB_NAME: mastery_hub
+      PORT: "8080"
+      JWT_SECRET: "k8sP2mNx7vQwR4tY9uAeHjLfGzXcBd3o6iWs1nMp5"
+      JWT_ACCESS_TTL: "15m"
+      JWT_REFRESH_TTL: "168h"
+      FRONTEND_URL: "http://10.195.80.64:3000"
+      CONTENT_DIR: /content
+      LOG_LEVEL: info
+      SANDBOX_TIMEOUT: "30s"
+      SANDBOX_MEMORY: "128m"
+    volumes:
+      - ./content:/content:ro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../infra/docker/frontend.Dockerfile
+      args:
+        VITE_API_URL: "/api"
+    restart: always
+    depends_on:
+      - backend
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "3000:80"
+    volumes:
+      - ./infra/docker/nginx-proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  mongodb_data:
