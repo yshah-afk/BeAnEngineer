@@ -1,0 +1,595 @@
+---
+title: "RAID and Storage"
+slug: "raid-and-storage"
+track: "operating-systems"
+module: "io-and-storage"
+difficulty: "Beginner"
+estimatedMinutes: 30
+prerequisites: ["io-subsystem", "disk-scheduling"]
+---
+
+## Learning Objectives
+
+By the end of this lesson, you will be able to:
+
+- Explain RAID levels 0, 1, 5, 6, and 10 with their trade-offs
+- Understand how RAID parity works and is calculated
+- Compare hardware RAID vs software RAID
+- Use LVM for flexible volume management on Linux
+- Differentiate between SAN and NAS storage architectures
+- Describe modern storage technologies: NVMe-oF and persistent memory
+
+## Prerequisites
+
+- Understanding of I/O subsystem concepts (device drivers, DMA)
+- Knowledge of disk scheduling and SSD vs HDD characteristics
+- Familiarity with Linux administration commands
+
+---
+
+## Introduction to RAID
+
+**RAID (Redundant Array of Independent Disks)** combines multiple physical disks into a single logical unit to improve performance, reliability, or both.
+
+### Why RAID?
+
+Single disks have limitations:
+
+| Limitation | RAID Solution |
+|-----------|---------------|
+| Single point of failure | Redundancy (mirrors, parity) |
+| Limited throughput | Striping across multiple disks |
+| Limited capacity | Aggregating multiple disks |
+| Slow rebuilds | Hot spares, distributed parity |
+
+---
+
+## RAID Levels
+
+### RAID 0 — Striping
+
+Data is split evenly across all disks with **no redundancy**. Maximum performance, zero fault tolerance.
+
+```mermaid
+graph TD
+    subgraph "RAID 0 (Striping)"
+        DATA["File Data: A B C D E F G H"]
+
+        D1["Disk 1<br/>A | C | E | G"]
+        D2["Disk 2<br/>B | D | F | H"]
+
+        DATA --> D1
+        DATA --> D2
+    end
+```
+
+| Property | Value |
+|----------|-------|
+| **Min disks** | 2 |
+| **Capacity** | N × disk size |
+| **Read speed** | N × single disk |
+| **Write speed** | N × single disk |
+| **Fault tolerance** | None — one disk failure = total data loss |
+| **Use case** | Temporary data, caches, scratch space |
+
+### RAID 1 — Mirroring
+
+Data is duplicated on every disk. Perfect redundancy but half the capacity.
+
+```mermaid
+graph TD
+    subgraph "RAID 1 (Mirroring)"
+        DATA["File Data: A B C D"]
+
+        D1["Disk 1<br/>A | B | C | D"]
+        D2["Disk 2 (mirror)<br/>A | B | C | D"]
+
+        DATA --> D1
+        DATA --> D2
+    end
+```
+
+| Property | Value |
+|----------|-------|
+| **Min disks** | 2 |
+| **Capacity** | 1 × disk size (50% efficiency) |
+| **Read speed** | Up to N × single disk (reads from any mirror) |
+| **Write speed** | 1 × single disk (must write all copies) |
+| **Fault tolerance** | Survives N-1 disk failures |
+| **Use case** | OS drives, critical databases |
+
+### RAID 5 — Striping with Distributed Parity
+
+Data and **parity** (error-correction information) are distributed across all disks. Can survive one disk failure.
+
+```mermaid
+graph TD
+    subgraph "RAID 5 (Distributed Parity)"
+        D1["Disk 1<br/>A1 | B1 | Cp | D1"]
+        D2["Disk 2<br/>A2 | Bp | C1 | D2"]
+        D3["Disk 3<br/>Ap | B2 | C2 | Dp"]
+    end
+
+    NOTE["p = parity block<br/>(distributed across disks)"]
+```
+
+| Property | Value |
+|----------|-------|
+| **Min disks** | 3 |
+| **Capacity** | (N-1) × disk size |
+| **Read speed** | (N-1) × single disk |
+| **Write speed** | Lower (parity calculation) |
+| **Fault tolerance** | 1 disk failure |
+| **Use case** | General-purpose storage, file servers |
+
+### RAID 6 — Striping with Double Parity
+
+Like RAID 5 but with **two** parity blocks per stripe. Survives two simultaneous disk failures.
+
+```mermaid
+graph TD
+    subgraph "RAID 6 (Double Distributed Parity)"
+        D1["Disk 1<br/>A1 | B1 | Cp | Dq"]
+        D2["Disk 2<br/>A2 | Bp | Cq | D1"]
+        D3["Disk 3<br/>Ap | Bq | C1 | D2"]
+        D4["Disk 4<br/>Aq | B2 | C2 | Dp"]
+    end
+
+    NOTE["p, q = two independent parity blocks"]
+```
+
+| Property | Value |
+|----------|-------|
+| **Min disks** | 4 |
+| **Capacity** | (N-2) × disk size |
+| **Fault tolerance** | 2 disk failures |
+| **Use case** | Large arrays, enterprise storage |
+
+### RAID 10 (1+0) — Mirrored Stripes
+
+A **stripe of mirrors**: data is first mirrored (RAID 1), then striped (RAID 0) across mirror pairs. Best performance with redundancy.
+
+```mermaid
+graph TD
+    subgraph "RAID 10 (Stripe of Mirrors)"
+        STRIPE["RAID 0 Stripe"]
+
+        subgraph "Mirror 1 (RAID 1)"
+            D1["Disk 1<br/>A | C"]
+            D2["Disk 2<br/>A | C"]
+        end
+
+        subgraph "Mirror 2 (RAID 1)"
+            D3["Disk 3<br/>B | D"]
+            D4["Disk 4<br/>B | D"]
+        end
+
+        STRIPE --> D1
+        STRIPE --> D3
+    end
+```
+
+| Property | Value |
+|----------|-------|
+| **Min disks** | 4 |
+| **Capacity** | N/2 × disk size (50% efficiency) |
+| **Read speed** | N × single disk |
+| **Write speed** | N/2 × single disk |
+| **Fault tolerance** | 1 disk per mirror pair |
+| **Use case** | Databases, high-performance applications |
+
+### RAID Level Comparison
+
+| RAID | Min Disks | Capacity | Read Speed | Write Speed | Fault Tolerance | Cost |
+|------|-----------|----------|-----------|-------------|-----------------|------|
+| **0** | 2 | 100% | Best | Best | None | Lowest |
+| **1** | 2 | 50% | Good | Normal | N-1 disks | High |
+| **5** | 3 | (N-1)/N | Good | Lower | 1 disk | Moderate |
+| **6** | 4 | (N-2)/N | Good | Lowest | 2 disks | Higher |
+| **10** | 4 | 50% | Best | Good | 1 per pair | Highest |
+
+---
+
+## RAID Parity Calculation
+
+RAID 5 and 6 use **parity** — a calculated value that allows reconstruction of data if a disk fails. The simplest parity is **XOR** (exclusive OR).
+
+### XOR Parity Example
+
+```
+Data on Disk 1: 1 0 1 1 0 1 0 0
+Data on Disk 2: 0 1 1 0 1 1 0 1
+─────────────────────────────────
+Parity (XOR):   1 1 0 1 1 0 0 1  ← stored on Disk 3
+
+If Disk 2 fails, recover with: Disk 1 XOR Parity
+  1 0 1 1 0 1 0 0
+  1 1 0 1 1 0 0 1
+  ─────────────────
+  0 1 1 0 1 1 0 1  ← Disk 2 data recovered!
+```
+
+### Parity Calculation for a RAID 5 Write
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant RAID as RAID Controller
+    participant D1 as Disk 1 (data)
+    participant D2 as Disk 2 (data)
+    participant D3 as Disk 3 (parity)
+
+    App->>RAID: Write new data to Disk 1
+    RAID->>D1: Read old data
+    RAID->>D3: Read old parity
+    RAID->>RAID: New parity = old_parity XOR old_data XOR new_data
+    RAID->>D1: Write new data
+    RAID->>D3: Write new parity
+    RAID->>App: Write complete
+```
+
+This is the **RAID 5 write penalty** — every write requires 4 I/O operations (2 reads + 2 writes), also called the "write hole."
+
+---
+
+## Hardware RAID vs Software RAID
+
+| Feature | Hardware RAID | Software RAID |
+|---------|-------------|---------------|
+| **Controller** | Dedicated RAID card (battery-backed cache) | OS kernel (mdadm on Linux) |
+| **CPU usage** | Zero (dedicated processor) | Uses host CPU |
+| **Cost** | $200–$2000+ | Free |
+| **Performance** | Excellent (dedicated cache) | Good (but CPU overhead) |
+| **Portability** | Vendor-specific (card required to read) | Universal (any Linux system) |
+| **Flexibility** | Limited to card features | Full OS control |
+| **Battery backup** | Yes (protects write cache) | No (but journaling helps) |
+
+### Linux Software RAID (mdadm)
+
+```bash
+# Create RAID 1 (mirror)
+sudo mdadm --create /dev/md0 --level=1 --raid-devices=2 /dev/sdb1 /dev/sdc1
+
+# Create RAID 5 (3 disks + 1 spare)
+sudo mdadm --create /dev/md1 --level=5 --raid-devices=3 \
+    --spare-devices=1 /dev/sdb /dev/sdc /dev/sdd /dev/sde
+
+# View RAID status
+cat /proc/mdstat
+# Personalities : [raid1] [raid6] [raid5] [raid4]
+# md0 : active raid1 sdc1[1] sdb1[0]
+#       104320 blocks [2/2] [UU]
+#
+# md1 : active raid5 sdd[2] sdc[1] sdb[0]
+#       209664 blocks level 5, 64k chunk, algorithm 2 [3/3] [UUU]
+
+# Detailed RAID information
+sudo mdadm --detail /dev/md0
+
+# Simulate a disk failure
+sudo mdadm --manage /dev/md1 --fail /dev/sdc
+
+# Replace a failed disk
+sudo mdadm --manage /dev/md1 --remove /dev/sdc
+sudo mdadm --manage /dev/md1 --add /dev/sdf
+
+# Save configuration
+sudo mdadm --detail --scan >> /etc/mdadm/mdadm.conf
+
+# Monitor RAID health
+sudo mdadm --monitor --scan --daemonize
+```
+
+---
+
+## LVM (Logical Volume Manager)
+
+**LVM** adds a flexible abstraction layer between physical disks and file systems, allowing dynamic resizing, snapshots, and spanning across disks.
+
+### LVM Architecture
+
+```mermaid
+graph TD
+    subgraph "Physical"
+        PV1["PV: /dev/sda1<br/>(Physical Volume)"]
+        PV2["PV: /dev/sdb1"]
+        PV3["PV: /dev/sdc1"]
+    end
+
+    subgraph "Volume Group"
+        VG["VG: vg_data<br/>(pools all PVs together)"]
+    end
+
+    subgraph "Logical Volumes"
+        LV1["LV: lv_home<br/>50 GB | ext4 | /home"]
+        LV2["LV: lv_var<br/>30 GB | xfs | /var"]
+        LV3["LV: lv_docker<br/>100 GB | xfs | /var/lib/docker"]
+    end
+
+    PV1 & PV2 & PV3 --> VG
+    VG --> LV1 & LV2 & LV3
+```
+
+### LVM Concepts
+
+| Concept | Abbreviation | Description |
+|---------|-------------|-------------|
+| **Physical Volume** | PV | A disk or partition initialized for LVM |
+| **Volume Group** | VG | Pool of one or more PVs |
+| **Logical Volume** | LV | Virtual partition carved from a VG |
+| **Physical Extent** | PE | Small fixed-size chunk (default 4 MB) |
+
+### LVM Commands
+
+```bash
+# Create Physical Volumes
+sudo pvcreate /dev/sdb1 /dev/sdc1
+
+# View PVs
+sudo pvs
+# PV         VG      Fmt  Attr PSize   PFree
+# /dev/sdb1  vg_data lvm2 a--  100.00g  50.00g
+# /dev/sdc1  vg_data lvm2 a--  100.00g 100.00g
+
+# Create Volume Group
+sudo vgcreate vg_data /dev/sdb1 /dev/sdc1
+
+# View VGs
+sudo vgs
+# VG      #PV #LV #SN Attr   VSize   VFree
+# vg_data   2   0   0 wz--n- 199.99g 199.99g
+
+# Create Logical Volumes
+sudo lvcreate -L 50G -n lv_home vg_data
+sudo lvcreate -L 30G -n lv_var vg_data
+
+# Format and mount
+sudo mkfs.ext4 /dev/vg_data/lv_home
+sudo mount /dev/vg_data/lv_home /home
+
+# Extend a logical volume (online!)
+sudo lvextend -L +20G /dev/vg_data/lv_home
+sudo resize2fs /dev/vg_data/lv_home      # For ext4
+# or
+sudo xfs_growfs /home                     # For XFS
+
+# Add a new disk to the VG
+sudo pvcreate /dev/sdd1
+sudo vgextend vg_data /dev/sdd1
+
+# LVM snapshots
+sudo lvcreate -s -L 10G -n snap_home /dev/vg_data/lv_home
+# Now you have a point-in-time snapshot for backup
+```
+
+### LVM Thin Provisioning
+
+**Thin provisioning** allocates storage on demand rather than upfront, allowing over-commitment:
+
+```bash
+# Create a thin pool
+sudo lvcreate -T -L 100G vg_data/thin_pool
+
+# Create thin volumes (can exceed pool size!)
+sudo lvcreate -V 200G -T vg_data/thin_pool -n thin_vol1
+sudo lvcreate -V 200G -T vg_data/thin_pool -n thin_vol2
+# Total virtual: 400 GB, actual pool: 100 GB
+# Space allocated only when data is written
+```
+
+---
+
+## SAN vs NAS
+
+### Storage Area Network (SAN)
+
+A **SAN** provides **block-level** storage over a dedicated high-speed network. The server sees SAN storage as local disks.
+
+```mermaid
+graph LR
+    subgraph "Servers"
+        S1["Server 1"]
+        S2["Server 2"]
+        S3["Server 3"]
+    end
+
+    subgraph "SAN Fabric"
+        SW["FC / iSCSI Switch"]
+    end
+
+    subgraph "Storage Array"
+        LUN1["LUN 1<br/>(block device)"]
+        LUN2["LUN 2<br/>(block device)"]
+        LUN3["LUN 3<br/>(block device)"]
+    end
+
+    S1 & S2 & S3 <-->|"FC / iSCSI"| SW
+    SW <--> LUN1 & LUN2 & LUN3
+```
+
+### Network-Attached Storage (NAS)
+
+A **NAS** provides **file-level** storage over the regular network using file-sharing protocols (NFS, SMB/CIFS).
+
+```mermaid
+graph LR
+    subgraph "Clients"
+        C1["Client 1"]
+        C2["Client 2"]
+        C3["Client 3"]
+    end
+
+    NET["Ethernet Network"]
+
+    subgraph "NAS Server"
+        NFS["NFS/SMB Service"]
+        FS["File System"]
+        DISKS["Disk Array"]
+    end
+
+    C1 & C2 & C3 <-->|"NFS / SMB"| NET
+    NET <--> NFS
+    NFS --> FS --> DISKS
+```
+
+### SAN vs NAS Comparison
+
+| Feature | SAN | NAS |
+|---------|-----|-----|
+| **Access level** | Block (raw disk) | File (shared filesystem) |
+| **Protocol** | FC, iSCSI, FCoE | NFS, SMB/CIFS |
+| **Network** | Dedicated (FC) or IP | Standard Ethernet |
+| **Performance** | Highest (dedicated network) | Good (but shared network) |
+| **Cost** | Expensive | Moderate |
+| **Complexity** | High | Low |
+| **Best for** | Databases, VMs, high-IOPS | File sharing, backups, home dirs |
+| **Server sees** | Block device (/dev/sdX) | Mounted filesystem (/mnt/share) |
+
+```bash
+# Mount NFS share (NAS)
+sudo mount -t nfs nas-server:/export/data /mnt/data
+
+# Connect iSCSI target (SAN)
+sudo iscsiadm -m discovery -t st -p san-server:3260
+sudo iscsiadm -m node -T iqn.2024.com.example:target -p san-server --login
+# New block device appears: /dev/sdc
+```
+
+---
+
+## Modern Storage Technologies
+
+### NVMe over Fabrics (NVMe-oF)
+
+**NVMe-oF** extends the NVMe protocol over a network, providing near-local NVMe performance for remote storage.
+
+```mermaid
+graph LR
+    subgraph "Client (Initiator)"
+        APP["Application"]
+        NVME_DRV["NVMe Driver"]
+    end
+
+    subgraph "Network Fabric"
+        RDMA["RDMA / TCP / FC"]
+    end
+
+    subgraph "Target (Storage)"
+        NVME_TGT["NVMe Target"]
+        SSD1["NVMe SSD"]
+        SSD2["NVMe SSD"]
+        SSD3["NVMe SSD"]
+    end
+
+    APP --> NVME_DRV
+    NVME_DRV <-->|"NVMe-oF"| RDMA
+    RDMA <--> NVME_TGT
+    NVME_TGT --> SSD1 & SSD2 & SSD3
+```
+
+| NVMe-oF Transport | Network | Latency | Bandwidth |
+|-------------------|---------|---------|-----------|
+| **RDMA (RoCE)** | Ethernet | ~10 μs | 100+ Gbps |
+| **TCP** | Standard Ethernet | ~100 μs | 25–100 Gbps |
+| **Fibre Channel** | FC | ~20 μs | 32–64 Gbps |
+
+```bash
+# Connect to NVMe-oF target over TCP
+sudo nvme connect -t tcp -a 192.168.1.100 -s 4420 -n nqn.example.com:subsys
+
+# List connected NVMe-oF devices
+sudo nvme list-subsys
+
+# Disconnect
+sudo nvme disconnect -n nqn.example.com:subsys
+```
+
+### Persistent Memory (PMEM)
+
+**Persistent memory** (e.g., Intel Optane) sits between DRAM and SSD in the storage hierarchy — byte-addressable like RAM but persistent like storage.
+
+```mermaid
+graph TD
+    subgraph "Storage Hierarchy with PMEM"
+        DRAM["DRAM<br/>~100 ns | Volatile | $$$$"]
+        PMEM["Persistent Memory<br/>~300 ns | Non-volatile | $$$"]
+        SSD["NVMe SSD<br/>~10 μs | Non-volatile | $$"]
+        HDD["HDD<br/>~10 ms | Non-volatile | $"]
+    end
+
+    DRAM --> PMEM --> SSD --> HDD
+```
+
+| Property | DRAM | PMEM | NVMe SSD |
+|----------|------|------|----------|
+| **Latency** | ~100 ns | ~300 ns | ~10,000 ns |
+| **Persistence** | Volatile | **Persistent** | Persistent |
+| **Addressing** | Byte | Byte | Block |
+| **Interface** | DIMM slot | DIMM slot | PCIe |
+| **Capacity** | 16–256 GB | 128–512 GB | 256 GB–30 TB |
+
+```bash
+# View PMEM devices
+ndctl list
+
+# Create a namespace in fsdax mode (filesystem DAX)
+sudo ndctl create-namespace -m fsdax -s 128G
+
+# Format and mount with DAX (direct access, bypass page cache)
+sudo mkfs.xfs /dev/pmem0
+sudo mount -o dax /dev/pmem0 /mnt/pmem
+
+# Applications can mmap the file for direct persistent memory access
+# (bypass the entire I/O stack!)
+```
+
+### DAX (Direct Access)
+
+**DAX** allows applications to directly access persistent memory without going through the page cache, using `mmap()` for load/store operations:
+
+```mermaid
+graph LR
+    subgraph "Traditional I/O"
+        APP1["Application"] -->|"read()"| CACHE1["Page Cache"]
+        CACHE1 -->|"I/O"| SSD1["SSD"]
+    end
+
+    subgraph "DAX (Persistent Memory)"
+        APP2["Application"] -->|"mmap + load/store"| PMEM2["PMEM<br/>(direct access!)"]
+    end
+```
+
+---
+
+## Storage Architecture Decision Guide
+
+```mermaid
+graph TD
+    START["Storage Need?"] --> Q1{"Local or<br/>networked?"}
+
+    Q1 -->|"Local"| Q2{"Performance<br/>priority?"}
+    Q1 -->|"Network"| Q3{"Block or<br/>file access?"}
+
+    Q2 -->|"Maximum"| NVME["NVMe SSD<br/>(+ RAID for redundancy)"]
+    Q2 -->|"Balanced"| SATA["SATA SSD<br/>(+ LVM for flexibility)"]
+    Q2 -->|"Capacity"| HDD2["HDD<br/>(+ RAID 5/6 for protection)"]
+
+    Q3 -->|"Block (databases, VMs)"| SAN2["SAN<br/>(iSCSI, NVMe-oF)"]
+    Q3 -->|"File (sharing, backups)"| NAS2["NAS<br/>(NFS, SMB)"]
+```
+
+---
+
+## Key Takeaways
+
+1. **RAID** combines multiple disks for performance and/or redundancy: **RAID 0** (striping, no protection), **RAID 1** (mirroring), **RAID 5** (distributed parity, 1 disk tolerance), **RAID 6** (double parity, 2 disk tolerance), **RAID 10** (mirrored stripes, best performance).
+
+2. **RAID parity** uses XOR to calculate error-correction data, allowing reconstruction of a failed disk's contents. The RAID 5 write penalty requires 4 I/O operations per write.
+
+3. **Software RAID** (Linux `mdadm`) is free and portable; **hardware RAID** offers dedicated processing and battery-backed cache but adds vendor lock-in and cost.
+
+4. **LVM** provides a flexible abstraction layer enabling dynamic volume resizing, disk spanning, snapshots, and thin provisioning without downtime.
+
+5. **SAN** provides block-level storage over dedicated networks (FC, iSCSI) for databases and VMs; **NAS** provides file-level storage over Ethernet (NFS, SMB) for file sharing and backups.
+
+6. **NVMe-oF** extends NVMe over network fabrics for near-local SSD performance, while **persistent memory** (PMEM with DAX) provides byte-addressable, non-volatile storage at near-DRAM speeds — blurring the line between memory and storage.

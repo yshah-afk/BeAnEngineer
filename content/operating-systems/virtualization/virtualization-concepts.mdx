@@ -1,0 +1,502 @@
+---
+title: "Virtualization Concepts"
+slug: "virtualization-concepts"
+track: "operating-systems"
+module: "virtualization"
+difficulty: "Intermediate"
+estimatedMinutes: 30
+prerequisites: []
+---
+
+## Learning Objectives
+
+By the end of this lesson, you will be able to:
+
+- Define virtualization and explain its fundamental purpose in computing
+- Differentiate between Type 1 (bare-metal) and Type 2 (hosted) hypervisors
+- Compare full virtualization, paravirtualization, and hardware-assisted virtualization
+- Explain how VT-x and AMD-V enable efficient hardware-assisted virtualization
+- Understand virtual machine architecture including virtual CPU, memory, and I/O
+- Evaluate trade-offs between different virtualization approaches
+
+## Prerequisites
+
+- Understanding of operating system architecture (kernel, user mode, system calls)
+- Memory management concepts (paging, virtual memory)
+- Basic knowledge of CPU privilege rings
+
+---
+
+## What Is Virtualization?
+
+**Virtualization** is the creation of a virtual (rather than physical) version of a computing resource — CPUs, memory, storage, or networks. The key abstraction is the **virtual machine (VM)**: a software-based emulation of a complete computer system.
+
+```mermaid
+graph TD
+    subgraph "Physical Machine"
+        HW[Hardware<br/>CPU, RAM, Disk, NIC]
+        HV[Hypervisor / VMM]
+        HW --> HV
+
+        subgraph VM1["Virtual Machine 1"]
+            G1[Guest OS 1<br/>Linux]
+            A1[App A]
+            A2[App B]
+        end
+
+        subgraph VM2["Virtual Machine 2"]
+            G2[Guest OS 2<br/>Windows]
+            A3[App C]
+        end
+
+        HV --> VM1
+        HV --> VM2
+    end
+```
+
+### Why Virtualize?
+
+| Benefit | Description |
+|---------|-------------|
+| **Server consolidation** | Run multiple workloads on fewer physical machines |
+| **Isolation** | Faults in one VM don't affect others |
+| **Resource efficiency** | Share hardware dynamically based on demand |
+| **Portability** | VMs are independent of underlying hardware |
+| **Testing/Development** | Run multiple OS environments on one machine |
+| **Disaster recovery** | Snapshot, migrate, and restore entire machines |
+| **Legacy support** | Run old OS versions alongside modern ones |
+
+### The Popek-Goldberg Theorem (1974)
+
+A **virtual machine monitor (VMM)** must satisfy three properties:
+
+1. **Equivalence/Fidelity**: Software runs identically in the VM as on real hardware (minus timing)
+2. **Resource control**: The VMM completely controls all hardware resources
+3. **Efficiency**: A statistically dominant fraction of machine instructions execute directly on hardware without VMM intervention
+
+An architecture is **virtualizable** if all sensitive instructions (those that affect machine state or depend on it) are a subset of privileged instructions (those that trap in user mode).
+
+---
+
+## Hypervisor Types
+
+The **hypervisor** (or VMM) is the software that creates and manages virtual machines.
+
+### Type 1: Bare-Metal Hypervisor
+
+Runs directly on hardware — the hypervisor IS the operating system:
+
+```mermaid
+graph TD
+    subgraph "Type 1 (Bare-Metal)"
+        HW1[Physical Hardware]
+        HV1[Hypervisor<br/>VMware ESXi / Xen / Hyper-V]
+        HW1 --> HV1
+
+        VM1A[VM 1<br/>Linux] --> HV1
+        VM1B[VM 2<br/>Windows] --> HV1
+        VM1C[VM 3<br/>FreeBSD] --> HV1
+    end
+```
+
+| Product | Vendor | Notable Features |
+|---------|--------|-----------------|
+| VMware ESXi | VMware/Broadcom | Enterprise standard, vMotion live migration |
+| Xen | Linux Foundation | Used by AWS EC2 (originally), paravirt support |
+| KVM | Linux kernel | Part of Linux, QEMU for device emulation |
+| Hyper-V | Microsoft | Integrated with Windows Server, Azure |
+
+### Type 2: Hosted Hypervisor
+
+Runs as an application on top of a host operating system:
+
+```mermaid
+graph TD
+    subgraph "Type 2 (Hosted)"
+        HW2[Physical Hardware]
+        HOS[Host OS<br/>Windows / macOS / Linux]
+        HW2 --> HOS
+        HV2[Hypervisor Application<br/>VirtualBox / VMware Workstation]
+        HOS --> HV2
+
+        VM2A[VM 1] --> HV2
+        VM2B[VM 2] --> HV2
+    end
+```
+
+| Product | Use Case |
+|---------|----------|
+| VirtualBox | Free, cross-platform development |
+| VMware Workstation/Fusion | Professional desktop virtualization |
+| Parallels Desktop | macOS, running Windows on Mac |
+| QEMU (user-mode) | Emulation, cross-architecture |
+
+### Type 1 vs Type 2 Comparison
+
+| Aspect | Type 1 | Type 2 |
+|--------|--------|--------|
+| Performance | Near-native | Additional host OS overhead |
+| Security | Smaller attack surface | Host OS vulnerabilities |
+| Hardware access | Direct | Through host OS drivers |
+| Setup complexity | Higher (dedicated machine) | Lower (install like any app) |
+| Use case | Data centers, cloud | Desktop development, testing |
+| Resource overhead | Minimal | Host OS consumes resources |
+
+### KVM: Blurring the Line
+
+KVM (Kernel-based Virtual Machine) turns the Linux kernel itself into a Type 1 hypervisor:
+
+```mermaid
+graph TD
+    HW[Hardware<br/>with VT-x/AMD-V]
+    Linux[Linux Kernel + KVM Module]
+    HW --> Linux
+
+    subgraph "Userspace"
+        QEMU1["QEMU Process<br/>(VM 1)"]
+        QEMU2["QEMU Process<br/>(VM 2)"]
+        Apps[Normal Applications]
+    end
+
+    Linux --> QEMU1
+    Linux --> QEMU2
+    Linux --> Apps
+```
+
+KVM is technically a Type 1 hypervisor (it runs directly on hardware via the kernel module), but the management and device emulation happens in userspace QEMU processes — combining benefits of both types.
+
+```bash
+# Check if KVM is available
+lsmod | grep kvm
+# kvm_intel    123456  0
+# kvm          456789  1 kvm_intel
+
+# Check hardware virtualization support
+grep -E 'vmx|svm' /proc/cpuinfo
+# flags: ... vmx ...  (Intel VT-x)
+# flags: ... svm ...  (AMD-V)
+
+# Create a VM with QEMU/KVM
+qemu-system-x86_64 \
+    -enable-kvm \
+    -m 2048 \
+    -smp 2 \
+    -hda disk.qcow2 \
+    -cdrom ubuntu.iso \
+    -boot d
+```
+
+---
+
+## Virtualization Approaches
+
+### Full Virtualization (Binary Translation)
+
+The guest OS runs completely unmodified. The hypervisor intercepts and translates privileged instructions:
+
+```mermaid
+sequenceDiagram
+    participant Guest as Guest OS
+    participant VMM as Hypervisor/VMM
+    participant HW as Hardware
+
+    Guest->>VMM: Privileged instruction (e.g., cli)
+    VMM->>VMM: Trap & emulate
+    VMM->>HW: Execute equivalent safe operation
+    HW->>VMM: Result
+    VMM->>Guest: Return modified result
+```
+
+**How binary translation works**:
+
+1. VMM scans guest code blocks before execution
+2. Sensitive instructions are replaced with calls into the VMM
+3. Translated blocks are cached for reuse
+
+| Pros | Cons |
+|------|------|
+| Unmodified guest OS | Performance overhead (translation) |
+| Complete compatibility | Complex VMM implementation |
+| Supports any OS | Some instructions are hard to translate |
+
+### Paravirtualization
+
+The guest OS is **modified** to call the hypervisor directly through **hypercalls** instead of executing sensitive instructions:
+
+```mermaid
+sequenceDiagram
+    participant Guest as Modified Guest OS
+    participant VMM as Hypervisor
+    participant HW as Hardware
+
+    Guest->>VMM: Hypercall (explicit API)
+    VMM->>HW: Perform operation
+    HW->>VMM: Result
+    VMM->>Guest: Return result
+```
+
+```c
+// Xen paravirtualization example (guest kernel code)
+// Instead of:
+//   asm volatile("mov %0, %%cr3" : : "r"(pgd));
+// Guest uses:
+HYPERVISOR_mmu_update(updates, count, NULL, DOMID_SELF);
+```
+
+| Pros | Cons |
+|------|------|
+| Near-native performance | Must modify guest OS kernel |
+| Lower overhead than full virt | Can't run unmodified proprietary OS |
+| Clean hypercall interface | Maintenance burden on guest |
+
+### Hardware-Assisted Virtualization
+
+Modern CPUs provide hardware support that eliminates the need for binary translation or guest modification:
+
+```mermaid
+graph TD
+    subgraph "CPU with VT-x/AMD-V"
+        Ring3[Ring 3: Guest Apps]
+        Ring0[Ring 0: Guest Kernel]
+        RootMode["Root Mode (Ring -1):<br/>Hypervisor"]
+
+        Ring3 -->|Syscall| Ring0
+        Ring0 -->|VM Exit| RootMode
+        RootMode -->|VM Entry| Ring0
+    end
+```
+
+**Intel VT-x** introduces a new CPU mode:
+
+| Mode | Purpose | Privilege |
+|------|---------|-----------|
+| VMX Root | Hypervisor execution | Highest (Ring -1 effectively) |
+| VMX Non-Root | Guest execution | Normal rings (0-3) |
+
+The **VMCS** (Virtual Machine Control Structure) defines what causes VM exits:
+
+```c
+// Simplified VMCS setup (Linux KVM)
+struct vmcs {
+    // Guest state area
+    uint64_t guest_rip;
+    uint64_t guest_rsp;
+    uint64_t guest_rflags;
+    uint64_t guest_cr0, guest_cr3, guest_cr4;
+
+    // Host state area (restored on VM exit)
+    uint64_t host_rip;
+    uint64_t host_rsp;
+
+    // VM execution control
+    uint32_t pin_based_controls;      // Interrupt handling
+    uint32_t proc_based_controls;     // I/O, MSR access
+    uint32_t exit_controls;           // What triggers VM exit
+    uint32_t entry_controls;
+};
+```
+
+### VM Entry and VM Exit
+
+```mermaid
+sequenceDiagram
+    participant HV as Hypervisor (Root)
+    participant Guest as Guest (Non-Root)
+
+    HV->>Guest: VMLAUNCH / VMRESUME
+    Note over Guest: Guest executes natively
+    Guest->>Guest: Normal instructions run at hardware speed
+    Guest->>HV: VM Exit (sensitive instruction, I/O, interrupt)
+    Note over HV: Handle exit reason
+    HV->>Guest: VMRESUME
+    Guest->>Guest: Continues execution
+```
+
+### Extended Page Tables (EPT / NPT)
+
+Without hardware support, the VMM must maintain **shadow page tables** — intercepting every guest page table modification:
+
+```mermaid
+graph LR
+    subgraph "Without EPT (Shadow Paging)"
+        GVA[Guest Virtual] -->|Guest PT| GPA[Guest Physical]
+        GPA -->|Shadow PT maintained by VMM| HPA[Host Physical]
+    end
+
+    subgraph "With EPT (Two-Level)"
+        GVA2[Guest Virtual] -->|Guest PT| GPA2[Guest Physical]
+        GPA2 -->|EPT hardware| HPA2[Host Physical]
+    end
+```
+
+**EPT** (Intel) / **NPT** (AMD) performs the guest-physical to host-physical translation in hardware:
+
+| Approach | TLB Miss Cost | VMM Complexity | Performance |
+|----------|--------------|----------------|-------------|
+| Shadow paging | Low (flat PT) | High (intercept all PT writes) | Good after warmup |
+| EPT/NPT | Higher (2D page walk) | Low (hardware handles it) | Better overall |
+
+---
+
+## Virtual Machine Architecture
+
+### Virtual CPU (vCPU)
+
+Each VM is assigned one or more vCPUs, which are scheduled onto physical CPUs by the hypervisor:
+
+```mermaid
+graph TD
+    subgraph "Physical Host (4 pCPUs)"
+        pCPU0[pCPU 0]
+        pCPU1[pCPU 1]
+        pCPU2[pCPU 2]
+        pCPU3[pCPU 3]
+    end
+
+    subgraph "VM 1 (2 vCPUs)"
+        vCPU0[vCPU 0]
+        vCPU1[vCPU 1]
+    end
+
+    subgraph "VM 2 (3 vCPUs)"
+        vCPU2[vCPU 0]
+        vCPU3[vCPU 1]
+        vCPU4[vCPU 2]
+    end
+
+    vCPU0 -.->|Scheduled on| pCPU0
+    vCPU1 -.->|Scheduled on| pCPU1
+    vCPU2 -.->|Scheduled on| pCPU2
+    vCPU3 -.->|Scheduled on| pCPU3
+    vCPU4 -.->|Time-shared| pCPU0
+```
+
+**Overcommitment**: Total vCPUs can exceed physical CPUs. The hypervisor time-shares, similar to OS thread scheduling.
+
+### Virtual Memory
+
+The hypervisor manages a second level of memory translation:
+
+```
+Guest Application → Guest Virtual Address
+                 → Guest Page Tables → Guest Physical Address
+                 → EPT/NPT → Host Physical Address
+                 → Actual RAM
+```
+
+**Memory overcommitment techniques**:
+
+| Technique | Description |
+|-----------|-------------|
+| Ballooning | Guest balloon driver reclaims unused pages |
+| Transparent page sharing | Deduplicate identical pages across VMs |
+| Swapping | Hypervisor swaps VM pages to disk |
+| Compression | Compress pages before swapping |
+
+### Virtual I/O
+
+```mermaid
+graph TD
+    subgraph "I/O Virtualization Approaches"
+        E[Emulation<br/>Full device emulation in VMM]
+        PV[Paravirtual I/O<br/>virtio drivers]
+        PT[Passthrough<br/>Direct hardware access]
+    end
+
+    E -->|"Slow but compatible"| Perf1[Low Performance]
+    PV -->|"Fast, needs driver"| Perf2[Good Performance]
+    PT -->|"Native speed, no sharing"| Perf3[Best Performance]
+```
+
+**virtio** is the standard paravirtualized I/O framework:
+
+```bash
+# Check for virtio devices in a VM
+lspci | grep -i virtio
+# 00:03.0 Network controller: Red Hat, Inc. Virtio network device
+# 00:04.0 SCSI storage controller: Red Hat, Inc. Virtio block device
+
+# virtio drivers in Linux
+lsmod | grep virtio
+# virtio_net
+# virtio_blk
+# virtio_pci
+# virtio_ring
+```
+
+### SR-IOV (Single Root I/O Virtualization)
+
+SR-IOV allows a single physical NIC to present multiple **virtual functions** directly to VMs:
+
+```mermaid
+graph TD
+    subgraph "Physical NIC with SR-IOV"
+        PF[Physical Function<br/>Full NIC management]
+        VF1[Virtual Function 1]
+        VF2[Virtual Function 2]
+        VF3[Virtual Function 3]
+    end
+
+    VM1[VM 1] -->|Direct access| VF1
+    VM2[VM 2] -->|Direct access| VF2
+    VM3[VM 3] -->|Direct access| VF3
+    Host[Host] --> PF
+```
+
+---
+
+## Performance Comparison
+
+| Approach | CPU Overhead | Memory Overhead | I/O Overhead | Guest Modification |
+|----------|:-----------:|:---------------:|:------------:|:-----------------:|
+| Full virtualization (binary translation) | 5-20% | Moderate | High | None |
+| Paravirtualization | 2-5% | Low | Low | Required |
+| Hardware-assisted (VT-x/AMD-V) | 1-3% | Low (with EPT) | Low (with virtio) | None |
+| Containers (for reference) | <1% | Minimal | Minimal | N/A |
+
+---
+
+## Live Migration
+
+One of virtualization's most powerful features — move a running VM between physical hosts with minimal downtime:
+
+```mermaid
+sequenceDiagram
+    participant S as Source Host
+    participant D as Destination Host
+
+    S->>D: 1. Pre-copy: Send all memory pages
+    S->>D: 2. Iterative: Send dirty pages
+    S->>D: 3. Iterative: Send dirty pages (fewer)
+    S->>S: 4. Pause VM
+    S->>D: 5. Send remaining dirty pages + CPU state
+    D->>D: 6. Resume VM
+    Note over D: VM running on new host!
+    Note over S,D: Typical downtime: 10-100ms
+```
+
+```bash
+# Live migrate VM using virsh (libvirt)
+virsh migrate --live myvm qemu+ssh://dest-host/system
+
+# QEMU monitor command
+(qemu) migrate -d tcp:dest-host:1234
+```
+
+---
+
+## Key Takeaways
+
+1. **Virtualization** creates isolated virtual machines that share physical hardware, enabling consolidation, isolation, portability, and efficient resource use.
+
+2. **Type 1 (bare-metal) hypervisors** run directly on hardware for maximum performance and security; **Type 2 (hosted)** hypervisors run atop an OS for convenience. KVM blurs this distinction.
+
+3. **Full virtualization** runs unmodified guests via binary translation; **paravirtualization** modifies guests for better performance; **hardware-assisted virtualization** (VT-x/AMD-V) provides the best of both worlds.
+
+4. **Extended Page Tables** (EPT/NPT) eliminate the need for shadow page tables, reducing VMM complexity and improving memory virtualization performance.
+
+5. **Virtual I/O** ranges from full emulation (slow but compatible) to paravirtual **virtio** (fast, needs drivers) to **SR-IOV passthrough** (native speed, limited sharing).
+
+6. **Live migration** enables moving running VMs between physical hosts with millisecond-level downtime — a cornerstone of modern cloud infrastructure.
+
+7. Modern hardware-assisted virtualization achieves **1-3% CPU overhead**, making it practical for even performance-sensitive production workloads.
